@@ -4,11 +4,12 @@
 
 ## 功能特性
 
-- 实时监控 BTC/USDT 和 ETH/USDT 趋势
+- 每5分钟监控 BTC/USDT 和 ETH/USDT 趋势
 - 基于 ADX、DMI、SMA、布林带、ATR 等技术指标进行分析
 - 趋势变化时自动发送 Telegram 通知
 - 数据持久化存储到 MySQL 数据库
 - Docker 容器化部署
+- 智能重试机制和速率限制处理
 
 ## 快速开始
 

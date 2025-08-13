@@ -39,7 +39,7 @@ logger.info(f"Monitoring symbols: BTC/USDT, ETH/USDT")
 logger.info(f"MySQL Host: {MYSQL_HOST}")
 logger.info(f"Telegram Chat ID: {TELEGRAM_CHAT_ID}")
 
-def fetch_taapi_data(symbol):
+def fetch_taapi_data(symbol, max_retries=3):
     url = "https://api.taapi.io/bulk"
     payload = {
         "secret": TAAPI_KEY,
@@ -56,13 +56,33 @@ def fetch_taapi_data(symbol):
             ]
         }
     }
-    logger.debug(f"Fetching data for {symbol}")
-    response = requests.post(url, json=payload)
-    if response.status_code != 200:
-        logger.error(f"TAAPI error for {symbol}: {response.text}")
-        raise Exception(f"TAAPI error for {symbol}: {response.text}")
-    logger.debug(f"Successfully fetched data for {symbol}")
-    return response.json()['data']
+    
+    for attempt in range(max_retries):
+        try:
+            logger.debug(f"Fetching data for {symbol} (attempt {attempt + 1}/{max_retries})")
+            response = requests.post(url, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                logger.debug(f"Successfully fetched data for {symbol}")
+                return response.json()['data']
+            elif response.status_code == 429:  # Rate limit
+                wait_time = (attempt + 1) * 10  # Exponential backoff
+                logger.warning(f"Rate limit hit for {symbol}, waiting {wait_time} seconds...")
+                time.sleep(wait_time)
+                continue
+            else:
+                logger.error(f"TAAPI error for {symbol}: {response.text}")
+                if attempt == max_retries - 1:  # Last attempt
+                    raise Exception(f"TAAPI error for {symbol}: {response.text}")
+                time.sleep(5)  # Wait before retry
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error for {symbol}: {str(e)}")
+            if attempt == max_retries - 1:  # Last attempt
+                raise Exception(f"Request error for {symbol}: {str(e)}")
+            time.sleep(5)  # Wait before retry
+    
+    raise Exception(f"Failed to fetch data for {symbol} after {max_retries} attempts")
 
 def parse_indicators(data):
     indicators = {}
@@ -212,8 +232,14 @@ if __name__ == "__main__":
             insights = {}
             trend_changed = False
             
-            for symbol in symbols:
+            for i, symbol in enumerate(symbols):
                 logger.info(f"Analyzing {symbol}...")
+                
+                # Add delay between requests to avoid rate limiting
+                if i > 0:
+                    logger.info("Waiting 5 seconds to avoid rate limit...")
+                    time.sleep(5)
+                
                 ta_data = fetch_taapi_data(symbol)
                 indicators = parse_indicators(ta_data)
                 trend = determine_trend(indicators)
@@ -238,10 +264,10 @@ if __name__ == "__main__":
             else:
                 logger.info("No trend changes detected, skipping notification")
                 
-            logger.info("Analysis cycle completed, waiting 60 seconds...")
+            logger.info("Analysis cycle completed, waiting 5 minutes...")
             
         except Exception as e:
             logger.error(f"Error in main loop: {str(e)}")
             logger.info("Continuing after error...")
             
-        time.sleep(60)  # 每分钟运行一次
+        time.sleep(300)  # 每5分钟运行一次
