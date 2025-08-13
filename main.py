@@ -51,8 +51,8 @@ def fetch_taapi_data(symbol):
                 {"indicator": "sma", "period": 50, "id": "sma50"},
                 {"indicator": "sma", "period": 200, "id": "sma200"},
                 {"indicator": "dmi", "id": "dmi"},  # Default period 14 for ADX, +DI, -DI
-                {"indicator": "bbands", "results": 252, "id": "bbands"},  # Default period 20, historical for percentile
-                {"indicator": "atr", "results": 252, "id": "atr"}  # Default period 14, historical for percentile
+                {"indicator": "bbands", "results": 20, "id": "bbands"},  # Limited to 20 results
+                {"indicator": "atr", "results": 20, "id": "atr"}  # Limited to 20 results
             ]
         }
     }
@@ -97,18 +97,20 @@ def determine_trend(indicators):
     sma50 = indicators['sma50']
     sma200 = indicators['sma200']
     
-    # Bandwidth analysis
+    logger.debug(f"Indicators - ADX: {adx}, +DI: {pdi}, -DI: {mdi}, SMA50: {sma50}, SMA200: {sma200}")
+    
+    # Bandwidth analysis (using available data, max 20 points)
     bandwidths = indicators.get('bandwidths', [])
-    if len(bandwidths) >= 20:
-        avg_last_20_bw = np.mean(bandwidths[-20:])
+    if len(bandwidths) >= 10:  # Need at least 10 points for meaningful analysis
+        avg_recent_bw = np.mean(bandwidths[-5:]) if len(bandwidths) >= 5 else np.mean(bandwidths)
         percentile_30_bw = np.percentile(bandwidths, 30)
-        low_bw = avg_last_20_bw < percentile_30_bw
+        low_bw = avg_recent_bw < percentile_30_bw
     else:
         low_bw = False  # Insufficient data
     
-    # ATR analysis
+    # ATR analysis (using available data, max 20 points)
     atr_values = indicators.get('atr_values', [])
-    if atr_values:
+    if len(atr_values) >= 10:  # Need at least 10 points for meaningful analysis
         current_atr = atr_values[-1]
         percentile_30_atr = np.percentile(atr_values, 30)
         low_atr = current_atr < percentile_30_atr
