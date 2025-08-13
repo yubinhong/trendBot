@@ -5,6 +5,21 @@ import mysql.connector
 import numpy as np
 from datetime import datetime
 import time
+import sys
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Force stdout to be unbuffered
+sys.stdout.reconfigure(line_buffering=True)
 
 # Load environment variables for security
 TAAPI_KEY = os.getenv('TAAPI_KEY')
@@ -16,7 +31,13 @@ MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD')
 MYSQL_DB = os.getenv('MYSQL_DB')
 
 if not all([TAAPI_KEY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB]):
+    logger.error("Missing required environment variables.")
     raise ValueError("Missing required environment variables.")
+
+logger.info("Starting crypto trend bot...")
+logger.info(f"Monitoring symbols: BTC/USDT, ETH/USDT")
+logger.info(f"MySQL Host: {MYSQL_HOST}")
+logger.info(f"Telegram Chat ID: {TELEGRAM_CHAT_ID}")
 
 def fetch_taapi_data(symbol):
     url = "https://api.taapi.io/bulk"
@@ -35,9 +56,12 @@ def fetch_taapi_data(symbol):
             ]
         }
     }
+    logger.debug(f"Fetching data for {symbol}")
     response = requests.post(url, json=payload)
     if response.status_code != 200:
+        logger.error(f"TAAPI error for {symbol}: {response.text}")
         raise Exception(f"TAAPI error for {symbol}: {response.text}")
+    logger.debug(f"Successfully fetched data for {symbol}")
     return response.json()['data']
 
 def parse_indicators(data):
@@ -121,75 +145,101 @@ def generate_insight(symbol, trend):
             return "趋势不明，建议观察更多数据。"
 
 def store_to_mysql(symbol, indicators, trend):
-    conn = mysql.connector.connect(
-        host=MYSQL_HOST,
-        user=MYSQL_USER,
-        password=MYSQL_PASSWORD,
-        database=MYSQL_DB
-    )
-    cursor = conn.cursor()
-    # Create table if not exists
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS crypto_trends (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            symbol VARCHAR(20),
-            timestamp DATETIME,
-            adx FLOAT,
-            pdi FLOAT,
-            mdi FLOAT,
-            sma50 FLOAT,
-            sma200 FLOAT,
-            bandwidth FLOAT,
-            atr FLOAT,
-            trend VARCHAR(50)
+    try:
+        logger.debug(f"Connecting to MySQL for {symbol}")
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB
         )
-    """)
-    # Insert data
-    now = datetime.now()
-    current_bw = indicators['bandwidths'][-1] if 'bandwidths' in indicators else None
-    current_atr = indicators['atr_values'][-1] if 'atr_values' in indicators else None
-    cursor.execute("""
-        INSERT INTO crypto_trends (symbol, timestamp, adx, pdi, mdi, sma50, sma200, bandwidth, atr, trend)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, (symbol, now, indicators['adx'], indicators['pdi'], indicators['mdi'], indicators['sma50'], indicators['sma200'], current_bw, current_atr, trend))
-    conn.commit()
-    cursor.close()
-    conn.close()
+        cursor = conn.cursor()
+        # Create table if not exists
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crypto_trends (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                symbol VARCHAR(20),
+                timestamp DATETIME,
+                adx FLOAT,
+                pdi FLOAT,
+                mdi FLOAT,
+                sma50 FLOAT,
+                sma200 FLOAT,
+                bandwidth FLOAT,
+                atr FLOAT,
+                trend VARCHAR(50)
+            )
+        """)
+        # Insert data
+        now = datetime.now()
+        current_bw = indicators['bandwidths'][-1] if 'bandwidths' in indicators else None
+        current_atr = indicators['atr_values'][-1] if 'atr_values' in indicators else None
+        cursor.execute("""
+            INSERT INTO crypto_trends (symbol, timestamp, adx, pdi, mdi, sma50, sma200, bandwidth, atr, trend)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (symbol, now, indicators['adx'], indicators['pdi'], indicators['mdi'], indicators['sma50'], indicators['sma200'], current_bw, current_atr, trend))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logger.debug(f"Successfully stored data for {symbol}")
+    except Exception as e:
+        logger.error(f"MySQL error for {symbol}: {str(e)}")
+        raise
 
 def send_to_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage?chat_id={TELEGRAM_CHAT_ID}&text={message}"
-    response = requests.get(url)
-    if response.status_code != 200:
-        print(f"Telegram send error: {response.text}")
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage?chat_id={TELEGRAM_CHAT_ID}&text={message}"
+        response = requests.get(url)
+        if response.status_code != 200:
+            logger.error(f"Telegram send error: {response.text}")
+        else:
+            logger.info("Telegram message sent successfully")
+    except Exception as e:
+        logger.error(f"Failed to send Telegram message: {str(e)}")
 
 if __name__ == "__main__":
     symbols = ["BTC/USDT", "ETH/USDT"]
     last_trends = {sym: None for sym in symbols}
+    
+    logger.info("Bot started successfully, beginning monitoring loop...")
+    
     while True:
         try:
+            logger.info("Starting new analysis cycle...")
             trends = {}
             insights = {}
             trend_changed = False
+            
             for symbol in symbols:
+                logger.info(f"Analyzing {symbol}...")
                 ta_data = fetch_taapi_data(symbol)
                 indicators = parse_indicators(ta_data)
                 trend = determine_trend(indicators)
                 trends[symbol] = trend
                 insights[symbol] = generate_insight(symbol, trend)
                 store_to_mysql(symbol, indicators, trend)
+                
                 if trend != last_trends[symbol]:
                     trend_changed = True
                     last_trends[symbol] = trend
-                print(f"{symbol} 趋势判断完成: {trend}")
+                    logger.info(f"{symbol} 趋势变化: {last_trends.get(symbol, 'None')} -> {trend}")
+                else:
+                    logger.info(f"{symbol} 趋势保持: {trend}")
             
             if trend_changed:
                 message = ""
                 for symbol in symbols:
                     message += f"当前{symbol.split('/')[0]}趋势: {trends[symbol]}\n理解与预测: {insights[symbol]}\n\n"
+                logger.info("Trend changed, sending Telegram notification...")
                 send_to_telegram(message.strip())
-                print(f"推送完成: {message}")
+                logger.info(f"Notification sent: {message}")
             else:
-                print("无趋势变化，未推送")
+                logger.info("No trend changes detected, skipping notification")
+                
+            logger.info("Analysis cycle completed, waiting 60 seconds...")
+            
         except Exception as e:
-            print(f"错误: {str(e)}")
+            logger.error(f"Error in main loop: {str(e)}")
+            logger.info("Continuing after error...")
+            
         time.sleep(60)  # 每分钟运行一次

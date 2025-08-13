@@ -5,10 +5,19 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONIOENCODING=utf-8
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
     networks:
       - trend-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   mysql:
     image: mysql:8.0
@@ -25,6 +34,10 @@ services:
       - "3306:3306"
     networks:
       - trend-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
 
 volumes:
   mysql_data:

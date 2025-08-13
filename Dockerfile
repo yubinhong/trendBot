@@ -18,5 +18,9 @@ COPY main.py .
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
+# Set environment variables for Python logging
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONIOENCODING=utf-8
+
 # Run the application
-CMD ["python", "main.py"]
+CMD ["python", "-u", "main.py"]

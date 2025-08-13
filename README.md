@@ -31,7 +31,14 @@ docker-compose up -d
 
 ### 4. 查看日志
 ```bash
+# 查看实时日志
 docker-compose logs -f trend-bot
+
+# 查看最近的日志
+docker-compose logs --tail=50 trend-bot
+
+# 查看所有服务日志
+docker-compose logs -f
 ```
 
 ## 环境变量说明
@@ -76,4 +83,10 @@ docker-compose logs -f trend-bot
 
 # 进入容器
 docker-compose exec trend-bot bash
+
+# 检查容器状态
+docker-compose ps
+
+# 调试模式启动（查看详细日志）
+docker-compose up --no-daemon
 ```
