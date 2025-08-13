@@ -1,0 +1,34 @@
+services:
+  trend-bot:
+    build: .
+    container_name: crypto-trend-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - mysql
+    networks:
+      - trend-network
+
+  mysql:
+    image: mysql:8.0
+    container_name: trend-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    networks:
+      - trend-network
+
+volumes:
+  mysql_data:
+
+networks:
+  trend-network:
+    driver: bridge
