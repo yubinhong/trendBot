@@ -117,7 +117,7 @@ def determine_trend(indicators):
     sma50 = indicators['sma50']
     sma200 = indicators['sma200']
     
-    logger.debug(f"Indicators - ADX: {adx}, +DI: {pdi}, -DI: {mdi}, SMA50: {sma50}, SMA200: {sma200}")
+    logger.info(f"Indicators - ADX: {adx:.2f}, +DI: {pdi:.2f}, -DI: {mdi:.2f}, SMA50: {sma50:.2f}, SMA200: {sma200:.2f}")
     
     # Bandwidth analysis (using available data, max 20 points)
     bandwidths = indicators.get('bandwidths', [])
@@ -137,34 +137,66 @@ def determine_trend(indicators):
     else:
         low_atr = False
     
+    # Log analysis details
+    logger.info(f"Trend analysis - ADX>25: {adx > 25}, +DI>-DI: {pdi > mdi}, SMA50>SMA200: {sma50 > sma200}")
+    logger.info(f"Volatility analysis - Low BW: {low_bw}, Low ATR: {low_atr}")
+    
+    # More nuanced trend detection
     if adx > 25 and pdi > mdi and sma50 > sma200:
+        logger.info("Trend decision: 上涨趋势 (Strong uptrend)")
         return "上涨趋势"
     elif adx > 25 and mdi > pdi and sma50 < sma200:
+        logger.info("Trend decision: 下跌趋势 (Strong downtrend)")
+        return "下跌趋势"
+    elif adx > 20 and pdi > mdi * 1.1 and sma50 > sma200:  # Moderate uptrend
+        logger.info("Trend decision: 上涨趋势 (Moderate uptrend)")
+        return "上涨趋势"
+    elif adx > 20 and mdi > pdi * 1.1 and sma50 < sma200:  # Moderate downtrend
+        logger.info("Trend decision: 下跌趋势 (Moderate downtrend)")
         return "下跌趋势"
     elif adx <= 25 and (low_bw or low_atr):
+        logger.info("Trend decision: 区间/波动小 (Range-bound/Low volatility)")
         return "区间/波动小"
+    elif sma50 > sma200 * 1.02:  # SMA50 significantly above SMA200
+        logger.info("Trend decision: 上涨趋势 (SMA-based uptrend)")
+        return "上涨趋势"
+    elif sma50 < sma200 * 0.98:  # SMA50 significantly below SMA200
+        logger.info("Trend decision: 下跌趋势 (SMA-based downtrend)")
+        return "下跌趋势"
     else:
+        logger.info("Trend decision: 未知 (Unknown - mixed signals)")
         return "未知"
 
-def generate_insight(symbol, trend):
-    if symbol == "BTC/USDT":
-        if trend == "上涨趋势":
-            return "基于当前强势ADX和+DI主导，短期内预计继续上涨，可能测试更高阻力位。"
-        elif trend == "下跌趋势":
-            return "当前-DI主导且SMA交叉向下，短期可能延续下跌，关注支撑位。市场仍有潜在反弹机会。"
-        elif trend == "区间/波动小":
-            return "ADX低位且波动率低，预计短期内维持震荡，等待突破信号。"
-        else:
-            return "趋势不明，建议观察更多数据。"
-    elif symbol == "ETH/USDT":
-        if trend == "上涨趋势":
-            return "基于当前强势ADX和+DI主导，短期内预计继续上涨，可能测试更高阻力位。"
-        elif trend == "下跌趋势":
-            return "当前-DI主导且SMA交叉向下，短期可能延续下跌，关注支撑位。市场仍有潜在反弹机会。"
-        elif trend == "区间/波动小":
-            return "ADX低位且波动率低，预计短期内维持震荡，等待突破信号。"
-        else:
-            return "趋势不明，建议观察更多数据。"
+def generate_insight(symbol, trend, indicators=None):
+    base_insights = {
+        "上涨趋势": "基于当前强势ADX和+DI主导，短期内预计继续上涨，可能测试更高阻力位。",
+        "下跌趋势": "当前-DI主导且SMA交叉向下，短期可能延续下跌，关注支撑位。市场仍有潜在反弹机会。",
+        "区间/波动小": "ADX低位且波动率低，预计短期内维持震荡，等待突破信号。"
+    }
+    
+    if trend in base_insights:
+        return base_insights[trend]
+    else:
+        # Enhanced insight for "未知" trend
+        if indicators:
+            adx = indicators.get('adx', 0)
+            pdi = indicators.get('pdi', 0)
+            mdi = indicators.get('mdi', 0)
+            sma50 = indicators.get('sma50', 0)
+            sma200 = indicators.get('sma200', 0)
+            
+            details = []
+            if adx <= 25:
+                details.append(f"ADX较低({adx:.1f})表明趋势强度不足")
+            if abs(pdi - mdi) < 5:
+                details.append("买卖力量相当，方向不明确")
+            if abs(sma50 - sma200) / sma200 < 0.02:  # Less than 2% difference
+                details.append("短长期均线接近，缺乏明确方向")
+            
+            if details:
+                return f"当前信号混合：{'; '.join(details)}。建议等待更明确的突破信号。"
+        
+        return "趋势信号混合，建议观察关键技术位突破情况。"
 
 def store_to_mysql(symbol, indicators, trend):
     try:
@@ -244,7 +276,7 @@ if __name__ == "__main__":
                 indicators = parse_indicators(ta_data)
                 trend = determine_trend(indicators)
                 trends[symbol] = trend
-                insights[symbol] = generate_insight(symbol, trend)
+                insights[symbol] = generate_insight(symbol, trend, indicators)
                 store_to_mysql(symbol, indicators, trend)
                 
                 if trend != last_trends[symbol]:
