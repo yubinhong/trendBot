@@ -3,7 +3,8 @@ import json
 import os
 import mysql.connector
 import numpy as np
-import talib
+import pandas as pd
+import pandas_ta as ta
 from datetime import datetime
 import time
 import sys
@@ -352,64 +353,64 @@ def aggregate_5min_to_timeframe(raw_data, timeframe_minutes):
     return aggregated
 
 def calculate_technical_indicators(ohlcv_data):
-    """使用TA-Lib基于OHLCV数据计算专业技术指标"""
+    """使用pandas-ta基于OHLCV数据计算专业技术指标"""
     if len(ohlcv_data) < 200:
         logger.warning(f"Insufficient data for technical indicators: {len(ohlcv_data)} periods")
         return None
     
-    # 转换为numpy数组
-    opens = np.array([float(d['open']) for d in ohlcv_data], dtype=np.float64)
-    highs = np.array([float(d['high']) for d in ohlcv_data], dtype=np.float64)
-    lows = np.array([float(d['low']) for d in ohlcv_data], dtype=np.float64)
-    closes = np.array([float(d['close']) for d in ohlcv_data], dtype=np.float64)
-    volumes = np.array([float(d['volume']) for d in ohlcv_data], dtype=np.float64)
-    
     try:
+        # 转换为pandas DataFrame
+        df = pd.DataFrame(ohlcv_data)
+        df['open'] = pd.to_numeric(df['open'], errors='coerce')
+        df['high'] = pd.to_numeric(df['high'], errors='coerce')
+        df['low'] = pd.to_numeric(df['low'], errors='coerce')
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
+        
+        # 删除包含NaN的行
+        df = df.dropna()
+        
+        if len(df) < 200:
+            logger.warning(f"Insufficient clean data after removing NaN: {len(df)} periods")
+            return None
+        
         # 计算SMA (Simple Moving Average)
-        sma50 = talib.SMA(closes, timeperiod=50)
-        sma200 = talib.SMA(closes, timeperiod=200)
+        df['sma50'] = ta.sma(df['close'], length=50)
+        df['sma200'] = ta.sma(df['close'], length=200)
         
         # 计算ADX和DMI指标
-        adx = talib.ADX(highs, lows, closes, timeperiod=14)
-        plus_di = talib.PLUS_DI(highs, lows, closes, timeperiod=14)
-        minus_di = talib.MINUS_DI(highs, lows, closes, timeperiod=14)
+        adx_data = ta.adx(df['high'], df['low'], df['close'], length=14)
+        df['adx'] = adx_data['ADX_14']
+        df['plus_di'] = adx_data['DMP_14']
+        df['minus_di'] = adx_data['DMN_14']
         
         # 计算布林带
-        bb_upper, bb_middle, bb_lower = talib.BBANDS(closes, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
+        bbands = ta.bbands(df['close'], length=20, std=2)
+        df['bb_upper'] = bbands['BBU_20_2.0']
+        df['bb_middle'] = bbands['BBM_20_2.0']
+        df['bb_lower'] = bbands['BBL_20_2.0']
         
-        # 计算布林带宽度（最近20个周期）
-        bandwidths = []
-        for i in range(len(bb_upper)):
-            if not (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_middle[i])):
-                if bb_middle[i] != 0:
-                    bandwidth = (bb_upper[i] - bb_lower[i]) / bb_middle[i] * 100
-                    bandwidths.append(bandwidth)
-                else:
-                    bandwidths.append(0)
-            else:
-                bandwidths.append(0)
+        # 计算布林带宽度
+        df['bandwidth'] = ((df['bb_upper'] - df['bb_lower']) / df['bb_middle'] * 100).fillna(0)
         
         # 计算ATR (Average True Range)
-        atr = talib.ATR(highs, lows, closes, timeperiod=14)
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         
         # 获取最新值（处理NaN）
-        current_sma50 = sma50[-1] if not np.isnan(sma50[-1]) else closes[-1]
-        current_sma200 = sma200[-1] if not np.isnan(sma200[-1]) else closes[-1]
-        current_adx = adx[-1] if not np.isnan(adx[-1]) else 0
-        current_plus_di = plus_di[-1] if not np.isnan(plus_di[-1]) else 0
-        current_minus_di = minus_di[-1] if not np.isnan(minus_di[-1]) else 0
-        current_atr = atr[-1] if not np.isnan(atr[-1]) else 0
+        current_sma50 = df['sma50'].iloc[-1] if not pd.isna(df['sma50'].iloc[-1]) else df['close'].iloc[-1]
+        current_sma200 = df['sma200'].iloc[-1] if not pd.isna(df['sma200'].iloc[-1]) else df['close'].iloc[-1]
+        current_adx = df['adx'].iloc[-1] if not pd.isna(df['adx'].iloc[-1]) else 0
+        current_plus_di = df['plus_di'].iloc[-1] if not pd.isna(df['plus_di'].iloc[-1]) else 0
+        current_minus_di = df['minus_di'].iloc[-1] if not pd.isna(df['minus_di'].iloc[-1]) else 0
+        current_atr = df['atr'].iloc[-1] if not pd.isna(df['atr'].iloc[-1]) else 0
         
         # 获取最近20个有效的布林带宽度值
-        valid_bandwidths = [bw for bw in bandwidths[-20:] if not np.isnan(bw) and bw != 0]
+        valid_bandwidths = df['bandwidth'].tail(20).dropna().tolist()
         if not valid_bandwidths:
             valid_bandwidths = [0]
         
         # 获取最近20个有效的ATR值
-        valid_atr_values = []
-        for atr_val in atr[-20:]:
-            if not np.isnan(atr_val):
-                valid_atr_values.append(atr_val)
+        valid_atr_values = df['atr'].tail(20).dropna().tolist()
         if not valid_atr_values:
             valid_atr_values = [current_atr]
         
@@ -417,12 +418,12 @@ def calculate_technical_indicators(ohlcv_data):
                     f"ADX: {current_adx:.2f}, +DI: {current_plus_di:.2f}, -DI: {current_minus_di:.2f}")
         
         return {
-            'price': closes[-1],
-            'open': ohlcv_data[-1]['open'],
-            'high': ohlcv_data[-1]['high'],
-            'low': ohlcv_data[-1]['low'],
-            'close': closes[-1],
-            'volume': ohlcv_data[-1]['volume'],
+            'price': df['close'].iloc[-1],
+            'open': df['open'].iloc[-1],
+            'high': df['high'].iloc[-1],
+            'low': df['low'].iloc[-1],
+            'close': df['close'].iloc[-1],
+            'volume': df['volume'].iloc[-1],
             'sma50': current_sma50,
             'sma200': current_sma200,
             'adx': current_adx,
@@ -433,7 +434,7 @@ def calculate_technical_indicators(ohlcv_data):
         }
         
     except Exception as e:
-        logger.error(f"Error calculating technical indicators with TA-Lib: {str(e)}")
+        logger.error(f"Error calculating technical indicators with pandas-ta: {str(e)}")
         return None
 
 def analyze_multiple_timeframes(symbol):
