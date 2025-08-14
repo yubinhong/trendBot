@@ -3,6 +3,7 @@ import json
 import os
 import mysql.connector
 import numpy as np
+import talib
 from datetime import datetime
 import time
 import sys
@@ -228,8 +229,215 @@ def determine_trend(indicators, timeframe="5m"):
         logger.info(f"[{timeframe}] Trend decision: 未知 (Mixed signals)")
         return "未知"
 
+def calculate_indicators_from_5min_data(symbol, timeframe_minutes):
+    """基于5分钟数据计算指定时间框架的技术指标"""
+    try:
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB
+        )
+        cursor = conn.cursor()
+        
+        # 计算需要的5分钟数据量
+        # 为了计算SMA200，我们需要200个目标时间框架的周期
+        # 每个目标时间框架需要 timeframe_minutes/5 个5分钟数据
+        periods_per_timeframe = timeframe_minutes // 5
+        target_periods = 250  # 目标时间框架周期数（比200多一些以确保数据充足）
+        periods_needed = periods_per_timeframe * target_periods
+        
+        logger.debug(f"Fetching {periods_needed} 5min periods for {timeframe_minutes}min analysis")
+        
+        cursor.execute("""
+            SELECT timestamp, close_price, high_price, low_price, open_price, volume
+            FROM crypto_5min_data 
+            WHERE symbol = %s AND close_price > 0 AND high_price > 0 AND low_price > 0
+            ORDER BY timestamp DESC
+            LIMIT %s
+        """, (symbol, periods_needed))
+        
+        raw_data = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        if len(raw_data) < periods_per_timeframe * 50:  # 至少需要50个目标周期的数据
+            logger.warning(f"Insufficient 5min data for {symbol} {timeframe_minutes}m analysis: {len(raw_data)} records")
+            return None
+        
+        logger.debug(f"Retrieved {len(raw_data)} 5min records for {symbol}")
+        
+        # 将5分钟数据聚合为目标时间框架
+        aggregated_data = aggregate_5min_to_timeframe(raw_data, timeframe_minutes)
+        
+        if len(aggregated_data) < 200:  # 需要至少200个周期来计算SMA200
+            logger.warning(f"Insufficient aggregated data for {symbol} {timeframe_minutes}m: {len(aggregated_data)} periods")
+            return None
+        
+        logger.debug(f"Aggregated to {len(aggregated_data)} {timeframe_minutes}min periods")
+        
+        # 计算技术指标
+        indicators = calculate_technical_indicators(aggregated_data)
+        
+        if indicators is None:
+            logger.warning(f"Failed to calculate indicators for {symbol} {timeframe_minutes}m")
+            return None
+        
+        logger.debug(f"Successfully calculated indicators for {symbol} {timeframe_minutes}m")
+        return indicators
+        
+    except Exception as e:
+        logger.error(f"Error calculating indicators for {symbol} {timeframe_minutes}m: {str(e)}")
+        return None
+
+def aggregate_5min_to_timeframe(raw_data, timeframe_minutes):
+    """将5分钟数据聚合为指定时间框架的OHLCV数据"""
+    if not raw_data:
+        return []
+    
+    # 按时间框架分组数据
+    periods_per_timeframe = timeframe_minutes // 5
+    aggregated = []
+    
+    # 反转数据，从最旧到最新
+    raw_data = list(reversed(raw_data))
+    
+    logger.debug(f"Aggregating {len(raw_data)} 5min periods to {timeframe_minutes}min timeframe")
+    logger.debug(f"Periods per timeframe: {periods_per_timeframe}")
+    
+    for i in range(0, len(raw_data), periods_per_timeframe):
+        period_data = raw_data[i:i + periods_per_timeframe]
+        
+        # 对于不完整的周期，如果数据量足够（至少一半），也包含进来
+        if len(period_data) < max(1, periods_per_timeframe // 2):
+            continue
+        
+        try:
+            # 聚合OHLCV，确保数据类型正确
+            timestamp = period_data[0][0]  # 使用周期开始时间
+            open_price = float(period_data[0][4])  # 第一个5分钟的开盘价
+            close_price = float(period_data[-1][1])  # 最后一个5分钟的收盘价
+            
+            # 过滤掉无效价格数据
+            valid_highs = [float(row[2]) for row in period_data if row[2] is not None and float(row[2]) > 0]
+            valid_lows = [float(row[3]) for row in period_data if row[3] is not None and float(row[3]) > 0]
+            valid_volumes = [float(row[5]) for row in period_data if row[5] is not None and float(row[5]) >= 0]
+            
+            if not valid_highs or not valid_lows:
+                continue  # 跳过无效数据
+            
+            high_price = max(valid_highs)  # 周期内最高价
+            low_price = min(valid_lows)  # 周期内最低价
+            volume = sum(valid_volumes) if valid_volumes else 0  # 周期内总成交量
+            
+            # 数据验证
+            if high_price < low_price or open_price <= 0 or close_price <= 0:
+                logger.warning(f"Invalid OHLC data: O={open_price}, H={high_price}, L={low_price}, C={close_price}")
+                continue
+            
+            aggregated.append({
+                'timestamp': timestamp,
+                'open': open_price,
+                'high': high_price,
+                'low': low_price,
+                'close': close_price,
+                'volume': volume
+            })
+            
+        except (ValueError, TypeError, IndexError) as e:
+            logger.warning(f"Error aggregating period data: {str(e)}")
+            continue
+    
+    logger.debug(f"Successfully aggregated to {len(aggregated)} {timeframe_minutes}min periods")
+    return aggregated
+
+def calculate_technical_indicators(ohlcv_data):
+    """使用TA-Lib基于OHLCV数据计算专业技术指标"""
+    if len(ohlcv_data) < 200:
+        logger.warning(f"Insufficient data for technical indicators: {len(ohlcv_data)} periods")
+        return None
+    
+    # 转换为numpy数组
+    opens = np.array([float(d['open']) for d in ohlcv_data], dtype=np.float64)
+    highs = np.array([float(d['high']) for d in ohlcv_data], dtype=np.float64)
+    lows = np.array([float(d['low']) for d in ohlcv_data], dtype=np.float64)
+    closes = np.array([float(d['close']) for d in ohlcv_data], dtype=np.float64)
+    volumes = np.array([float(d['volume']) for d in ohlcv_data], dtype=np.float64)
+    
+    try:
+        # 计算SMA (Simple Moving Average)
+        sma50 = talib.SMA(closes, timeperiod=50)
+        sma200 = talib.SMA(closes, timeperiod=200)
+        
+        # 计算ADX和DMI指标
+        adx = talib.ADX(highs, lows, closes, timeperiod=14)
+        plus_di = talib.PLUS_DI(highs, lows, closes, timeperiod=14)
+        minus_di = talib.MINUS_DI(highs, lows, closes, timeperiod=14)
+        
+        # 计算布林带
+        bb_upper, bb_middle, bb_lower = talib.BBANDS(closes, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
+        
+        # 计算布林带宽度（最近20个周期）
+        bandwidths = []
+        for i in range(len(bb_upper)):
+            if not (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_middle[i])):
+                if bb_middle[i] != 0:
+                    bandwidth = (bb_upper[i] - bb_lower[i]) / bb_middle[i] * 100
+                    bandwidths.append(bandwidth)
+                else:
+                    bandwidths.append(0)
+            else:
+                bandwidths.append(0)
+        
+        # 计算ATR (Average True Range)
+        atr = talib.ATR(highs, lows, closes, timeperiod=14)
+        
+        # 获取最新值（处理NaN）
+        current_sma50 = sma50[-1] if not np.isnan(sma50[-1]) else closes[-1]
+        current_sma200 = sma200[-1] if not np.isnan(sma200[-1]) else closes[-1]
+        current_adx = adx[-1] if not np.isnan(adx[-1]) else 0
+        current_plus_di = plus_di[-1] if not np.isnan(plus_di[-1]) else 0
+        current_minus_di = minus_di[-1] if not np.isnan(minus_di[-1]) else 0
+        current_atr = atr[-1] if not np.isnan(atr[-1]) else 0
+        
+        # 获取最近20个有效的布林带宽度值
+        valid_bandwidths = [bw for bw in bandwidths[-20:] if not np.isnan(bw) and bw != 0]
+        if not valid_bandwidths:
+            valid_bandwidths = [0]
+        
+        # 获取最近20个有效的ATR值
+        valid_atr_values = []
+        for atr_val in atr[-20:]:
+            if not np.isnan(atr_val):
+                valid_atr_values.append(atr_val)
+        if not valid_atr_values:
+            valid_atr_values = [current_atr]
+        
+        logger.debug(f"Calculated indicators - SMA50: {current_sma50:.2f}, SMA200: {current_sma200:.2f}, "
+                    f"ADX: {current_adx:.2f}, +DI: {current_plus_di:.2f}, -DI: {current_minus_di:.2f}")
+        
+        return {
+            'price': closes[-1],
+            'open': ohlcv_data[-1]['open'],
+            'high': ohlcv_data[-1]['high'],
+            'low': ohlcv_data[-1]['low'],
+            'close': closes[-1],
+            'volume': ohlcv_data[-1]['volume'],
+            'sma50': current_sma50,
+            'sma200': current_sma200,
+            'adx': current_adx,
+            'pdi': current_plus_di,
+            'mdi': current_minus_di,
+            'bandwidths': valid_bandwidths,
+            'atr_values': valid_atr_values
+        }
+        
+    except Exception as e:
+        logger.error(f"Error calculating technical indicators with TA-Lib: {str(e)}")
+        return None
+
 def analyze_multiple_timeframes(symbol):
-    """分析多个时间框架的趋势"""
+    """基于数据库中的5分钟数据分析多个时间框架的趋势"""
     timeframes = {
         "15m": {"minutes": 15, "name": "15分钟"},
         "1h": {"minutes": 60, "name": "1小时"},
@@ -243,9 +451,18 @@ def analyze_multiple_timeframes(symbol):
     
     for tf, config in timeframes.items():
         try:
-            # 获取对应时间框架的数据
-            ta_data = fetch_taapi_data(symbol, tf)
-            indicators = parse_indicators(ta_data)
+            logger.info(f"Calculating {config['name']} indicators from 5min data for {symbol}")
+            
+            # 基于5分钟数据计算指定时间框架的指标
+            indicators = calculate_indicators_from_5min_data(symbol, config['minutes'])
+            
+            if indicators is None:
+                logger.warning(f"Could not calculate indicators for {symbol} {tf}")
+                trends[tf] = "数据不足"
+                insights[tf] = f"[{config['name']}]数据不足，无法分析趋势"
+                continue
+            
+            # 判断趋势
             trend = determine_trend(indicators, tf)
             insight = generate_insight(symbol, trend, indicators, tf)
             
@@ -260,7 +477,7 @@ def analyze_multiple_timeframes(symbol):
         except Exception as e:
             logger.error(f"Error analyzing {tf} timeframe for {symbol}: {str(e)}")
             trends[tf] = "错误"
-            insights[tf] = f"分析{config['name']}趋势时出错"
+            insights[tf] = f"分析{config['name']}趋势时出错: {str(e)}"
     
     return trends, insights
 
@@ -458,8 +675,9 @@ if __name__ == "__main__":
     last_trends = {sym: {tf: None for tf in ["15m", "1h", "4h", "1d", "1w"]} for sym in symbols}
     
     logger.info("Multi-timeframe crypto trend bot started successfully...")
+    logger.info("Data strategy: Collect 5min data from API, calculate 15m/1h/4h/1d/1w trends from database")
     logger.info("Monitoring timeframes: 15m, 1h, 4h, 1d, 1w")
-    logger.info("Data collection: 5min intervals, 90-day retention")
+    logger.info("Data retention: 90 days, cleanup daily at midnight")
     
     while True:
         try:
@@ -482,7 +700,7 @@ if __name__ == "__main__":
                     logger.info("Waiting 10 seconds to avoid rate limit...")
                     time.sleep(10)
                 
-                # 首先获取5分钟数据并存储
+                # 首先获取5分钟数据并存储（这是唯一的API调用）
                 try:
                     data_5m = fetch_taapi_data(symbol, "5m")
                     indicators_5m = parse_indicators(data_5m)
@@ -490,8 +708,9 @@ if __name__ == "__main__":
                     logger.info(f"Stored 5min data for {symbol}")
                 except Exception as e:
                     logger.error(f"Failed to store 5min data for {symbol}: {str(e)}")
+                    continue  # 如果无法获取5分钟数据，跳过这个symbol
                 
-                # 分析多个时间框架
+                # 基于数据库中的5分钟数据分析多个时间框架
                 symbol_trends, symbol_insights = analyze_multiple_timeframes(symbol)
                 all_trends[symbol] = symbol_trends
                 all_insights[symbol] = symbol_insights
@@ -538,10 +757,10 @@ if __name__ == "__main__":
             else:
                 logger.info("No trend changes detected across all timeframes")
                 
-            logger.info("Multi-timeframe analysis cycle completed, waiting 5 minutes...")
+            logger.info("Multi-timeframe analysis cycle completed, waiting 5 minut..")
             
         except Exception as e:
             logger.error(f"Error in main loop: {str(e)}")
             logger.info("Continuing after error...")
             
-        time.sleep(300)  # 每5分钟运行一次
+        time.sleep(3600)  # 每小时运行一次
