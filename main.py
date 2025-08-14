@@ -764,4 +764,4 @@ if __name__ == "__main__":
             logger.error(f"Error in main loop: {str(e)}")
             logger.info("Continuing after error...")
             
-        time.sleep(3600)  # 每小时运行一次
+        time.sleep(300)  # 每5分钟运行一次
