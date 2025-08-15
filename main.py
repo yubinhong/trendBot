@@ -41,6 +41,21 @@ logger.info(f"Monitoring symbols: BTC/USDT, ETH/USDT")
 logger.info(f"MySQL Host: {MYSQL_HOST}")
 logger.info(f"Telegram Chat ID: {TELEGRAM_CHAT_ID}")
 
+# Test database connection
+try:
+    conn = mysql.connector.connect(
+        host=MYSQL_HOST,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DB
+    )
+    conn.close()
+    logger.info("✓ Database connection successful")
+except Exception as e:
+    logger.error(f"✗ Database connection failed: {str(e)}")
+    logger.error("Please check your database configuration and ensure MySQL is running")
+    sys.exit(1)
+
 def fetch_taapi_data(symbol, interval="1h", max_retries=3):
     url = "https://api.taapi.io/bulk"
     payload = {
@@ -632,30 +647,6 @@ def store_5min_data(symbol, indicators, interval="5m"):
         )
         cursor = conn.cursor()
         
-        # Create 5min data table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS crypto_5min_data (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                symbol VARCHAR(20),
-                timestamp DATETIME,
-                interval_type VARCHAR(10),
-                price FLOAT,
-                open_price FLOAT,
-                high_price FLOAT,
-                low_price FLOAT,
-                close_price FLOAT,
-                volume FLOAT,
-                adx FLOAT,
-                pdi FLOAT,
-                mdi FLOAT,
-                sma50 FLOAT,
-                sma200 FLOAT,
-                bandwidth FLOAT,
-                atr FLOAT,
-                UNIQUE KEY unique_record (symbol, timestamp, interval_type)
-            )
-        """)
-        
         # Insert 5min data
         now = datetime.now()
         current_bw = indicators['bandwidths'][-1] if 'bandwidths' in indicators else None
@@ -695,22 +686,6 @@ def store_trend_analysis(symbol, timeframe, trend, insight, adx_strength=0):
             database=MYSQL_DB
         )
         cursor = conn.cursor()
-        
-        # Create trends table with validity tracking
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS crypto_trends (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                symbol VARCHAR(20),
-                timeframe VARCHAR(10),
-                timestamp DATETIME,
-                trend VARCHAR(50),
-                insight TEXT,
-                adx_strength FLOAT,
-                expected_validity_hours INT,
-                is_expired BOOLEAN DEFAULT FALSE,
-                UNIQUE KEY unique_trend (symbol, timeframe, timestamp)
-            )
-        """)
         
         # 计算预期有效期（小时）
         validity_hours = {
@@ -769,10 +744,76 @@ def check_expired_trends():
     except Exception as e:
         logger.error(f"Error checking expired trends: {str(e)}")
 
+def ensure_database_tables():
+    """确保数据库表存在"""
+    try:
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB
+        )
+        cursor = conn.cursor()
+        
+        # 创建5分钟数据表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crypto_5min_data (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                symbol VARCHAR(20),
+                timestamp DATETIME,
+                interval_type VARCHAR(10),
+                price FLOAT,
+                open_price FLOAT,
+                high_price FLOAT,
+                low_price FLOAT,
+                close_price FLOAT,
+                volume FLOAT,
+                adx FLOAT,
+                pdi FLOAT,
+                mdi FLOAT,
+                sma50 FLOAT,
+                sma200 FLOAT,
+                bandwidth FLOAT,
+                atr FLOAT,
+                UNIQUE KEY unique_record (symbol, timestamp, interval_type)
+            )
+        """)
+        
+        # 创建趋势分析表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crypto_trends (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                symbol VARCHAR(20),
+                timeframe VARCHAR(10),
+                timestamp DATETIME,
+                trend VARCHAR(50),
+                insight TEXT,
+                adx_strength FLOAT,
+                expected_validity_hours INT,
+                is_expired BOOLEAN DEFAULT FALSE,
+                UNIQUE KEY unique_trend (symbol, timeframe, timestamp)
+            )
+        """)
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logger.info("Database tables created successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error creating database tables: {str(e)}")
+        return False
+
 def initialize_historical_data(symbol):
     """初始化时获取足够的历史数据"""
     try:
         logger.info(f"Initializing historical data for {symbol}...")
+        
+        # 首先确保表存在
+        if not ensure_database_tables():
+            logger.error("Failed to create database tables")
+            return False
         
         # 检查现有数据量
         conn = mysql.connector.connect(
@@ -854,42 +895,6 @@ def initialize_historical_data(symbol):
         if total_stored == 0:
             logger.warning(f"No historical data could be fetched for {symbol} due to API limits")
             logger.info(f"System will start with current data and accumulate over time")
-            # 至少确保表结构存在
-            try:
-                conn = mysql.connector.connect(
-                    host=MYSQL_HOST,
-                    user=MYSQL_USER,
-                    password=MYSQL_PASSWORD,
-                    database=MYSQL_DB
-                )
-                cursor = conn.cursor()
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS crypto_5min_data (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        symbol VARCHAR(20),
-                        timestamp DATETIME,
-                        interval_type VARCHAR(10),
-                        price FLOAT,
-                        open_price FLOAT,
-                        high_price FLOAT,
-                        low_price FLOAT,
-                        close_price FLOAT,
-                        volume FLOAT,
-                        adx FLOAT,
-                        pdi FLOAT,
-                        mdi FLOAT,
-                        sma50 FLOAT,
-                        sma200 FLOAT,
-                        bandwidth FLOAT,
-                        atr FLOAT,
-                        UNIQUE KEY unique_record (symbol, timestamp, interval_type)
-                    )
-                """)
-                conn.commit()
-                cursor.close()
-                conn.close()
-            except Exception as e:
-                logger.error(f"Error creating table structure: {str(e)}")
         
         logger.info(f"Historical data initialization completed for {symbol}: {total_stored} total records")
         return total_stored > 0
@@ -940,30 +945,6 @@ def store_historical_data_bulk(symbol, historical_data, interval, batch_offset=0
             database=MYSQL_DB
         )
         cursor = conn.cursor()
-        
-        # 确保表存在
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS crypto_5min_data (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                symbol VARCHAR(20),
-                timestamp DATETIME,
-                interval_type VARCHAR(10),
-                price FLOAT,
-                open_price FLOAT,
-                high_price FLOAT,
-                low_price FLOAT,
-                close_price FLOAT,
-                volume FLOAT,
-                adx FLOAT,
-                pdi FLOAT,
-                mdi FLOAT,
-                sma50 FLOAT,
-                sma200 FLOAT,
-                bandwidth FLOAT,
-                atr FLOAT,
-                UNIQUE KEY unique_record (symbol, timestamp, interval_type)
-            )
-        """)
         
         stored_count = 0
         
@@ -1077,6 +1058,12 @@ if __name__ == "__main__":
     logger.info("Data strategy: Collect 5min data from API, calculate 15m/1h/4h/1d/1w trends from database")
     logger.info("Monitoring timeframes: 15m, 1h, 4h, 1d, 1w")
     logger.info("Data retention: 90 days, cleanup daily at midnight")
+    
+    # 首先确保数据库表存在
+    logger.info("Setting up database tables...")
+    if not ensure_database_tables():
+        logger.error("Failed to create database tables. Exiting...")
+        sys.exit(1)
     
     # 初始化历史数据
     logger.info("Checking and initializing historical data...")
