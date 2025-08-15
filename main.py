@@ -96,6 +96,49 @@ def fetch_binance_klines(symbol, interval="5m", limit=1000, max_retries=3):
     
     raise Exception(f"Failed to fetch klines for {symbol} after {max_retries} attempts")
 
+def fetch_binance_klines_with_endtime(symbol, interval="5m", limit=1000, end_time=None, max_retries=3):
+    """从 Binance API 获取指定结束时间的 K线数据"""
+    # 转换符号格式：BTC/USDT -> BTCUSDT
+    binance_symbol = symbol.replace('/', '')
+    
+    url = "https://api.binance.com/api/v3/klines"
+    params = {
+        "symbol": binance_symbol,
+        "interval": interval,
+        "limit": limit
+    }
+    
+    if end_time:
+        params["endTime"] = end_time
+    
+    for attempt in range(max_retries):
+        try:
+            logger.debug(f"Fetching {limit} {interval} klines for {symbol} (endTime: {end_time})")
+            response = requests.get(url, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                klines = response.json()
+                logger.debug(f"Successfully fetched {len(klines)} klines for {symbol}")
+                return klines
+            elif response.status_code == 429:  # Rate limit
+                wait_time = (attempt + 1) * 5
+                logger.warning(f"Binance rate limit hit for {symbol}, waiting {wait_time} seconds...")
+                time.sleep(wait_time)
+                continue
+            else:
+                logger.error(f"Binance API error for {symbol}: {response.text}")
+                if attempt == max_retries - 1:
+                    raise Exception(f"Binance API error for {symbol}: {response.text}")
+                time.sleep(2)
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error for {symbol}: {str(e)}")
+            if attempt == max_retries - 1:
+                raise Exception(f"Request error for {symbol}: {str(e)}")
+            time.sleep(2)
+    
+    raise Exception(f"Failed to fetch klines for {symbol} after {max_retries} attempts")
+
 def convert_klines_to_ohlcv(klines):
     """将 Binance K线数据转换为 OHLCV 格式"""
     ohlcv_data = []
@@ -507,7 +550,7 @@ def check_data_sufficiency(symbol):
             "can_analyze_15m": recent_count >= 60,    # 需要至少5小时数据
             "can_analyze_1h": recent_count >= 240,    # 需要至少20小时数据
             "can_analyze_4h": total_count >= 1000,    # 需要至少3-4天数据
-            "can_analyze_1d": total_count >= 2000,    # 需要至少7天数据
+            "can_analyze_1d": total_count >= 5000,    # 需要至少17天数据（基础分析）
 
         }
         
@@ -541,7 +584,14 @@ def analyze_multiple_timeframes(symbol):
             if data_sufficiency and not data_sufficiency.get(can_analyze_key, False):
                 logger.warning(f"Insufficient data for {symbol} {tf} analysis")
                 trends[tf] = "数据积累中"
-                insights[tf] = f"[{config['name']}]数据积累中，请等待更多数据收集后再分析"
+                
+                if tf == "1d":
+                    # 1天趋势需要特别说明
+                    total_records = data_sufficiency.get('total_records', 0)
+                    days_available = total_records / 288  # 每天288个5分钟数据点
+                    insights[tf] = f"[{config['name']}]数据积累中（当前约{days_available:.1f}天数据），完整分析需要200天数据。基础分析将随数据积累逐步改善。"
+                else:
+                    insights[tf] = f"[{config['name']}]数据积累中，请等待更多数据收集后再分析"
                 continue
             
             logger.info(f"Calculating {config['name']} indicators from 5min data for {symbol}")
@@ -859,42 +909,71 @@ def initialize_historical_data(symbol):
             logger.info(f"{symbol} has no historical data, attempting to fetch initial data")
         
         # 只获取5分钟数据，然后基于这些数据聚合计算其他时间框架
-        # 删除1周分析后，我们只需要支持到1天趋势
-        # 1天趋势的SMA200需要200天数据 = 200 * 288个5分钟数据点 = 57600个数据点
-        # 为了安全起见，我们获取约60天的5分钟数据
+        # 1天趋势的SMA200需要200天数据 = 57,600个5分钟数据点
+        # 考虑到初始化时间，我们采用渐进式策略：
+        # 1. 先获取足够的数据支持短期分析（15分钟、1小时、4小时）
+        # 2. 1天趋势会随着时间积累逐步改善
         
-        # 分批获取5分钟数据（Binance限制每次最多1000条）
-        total_5min_needed = 17280  # 60天的5分钟数据 (60 * 24 * 60 / 5)
-        batches_needed = (total_5min_needed + 999) // 1000  # 向上取整，约18批
+        # 分批获取5分钟数据
+        # 目标：获取约30天的数据，足够支持4小时趋势的完整分析
+        batches_needed = 9  # 9批 × 1000 = 9,000条记录（约31天）
         
-        logger.info(f"Will fetch {batches_needed} batches of 5min data (total ~{total_5min_needed} records, ~60 days)")
+        logger.info(f"Will fetch {batches_needed} batches of 5min data (total ~9000 records, ~31 days)")
+        logger.info("This supports full analysis for 15m/1h/4h trends. 1-day trend will improve over time.")
         
         intervals_to_fetch = [("5m", 1000)] * batches_needed
         
         total_stored = 0
         
-        for interval, limit in intervals_to_fetch:
+        # 获取历史数据的策略：
+        # 1. 第一批获取最新的1000条5分钟数据
+        # 2. 后续批次使用最早数据的时间戳作为endTime，继续向前获取
+        
+        last_timestamp = None
+        
+        for batch_num in range(1, len(intervals_to_fetch) + 1):
             try:
-                logger.info(f"Fetching {limit} {interval} historical klines for {symbol}")
+                interval, limit = intervals_to_fetch[0]  # 都是5分钟数据
+                logger.info(f"Fetching batch {batch_num}/{len(intervals_to_fetch)}: {limit} {interval} klines for {symbol}")
                 
                 # 获取历史K线数据
-                ohlcv_data = fetch_historical_klines_bulk(symbol, interval, limit)
+                if batch_num == 1:
+                    # 第一批：获取最新数据
+                    ohlcv_data = fetch_historical_klines_bulk(symbol, interval, limit)
+                else:
+                    # 后续批次：使用endTime获取更早的数据
+                    if last_timestamp:
+                        end_time = int(last_timestamp.timestamp() * 1000)  # 转换为毫秒
+                        ohlcv_data = fetch_historical_klines_with_time(symbol, interval, limit, end_time)
+                    else:
+                        logger.warning(f"Batch {batch_num}: no last_timestamp available, skipping")
+                        continue
                 
-                if ohlcv_data:
+                if ohlcv_data and len(ohlcv_data) > 0:
                     # 存储数据
                     stored_count = store_historical_klines_bulk(symbol, ohlcv_data, interval)
                     total_stored += stored_count
-                    logger.info(f"Successfully stored {stored_count} records from {interval} klines")
+                    
+                    # 更新最早时间戳用于下一批
+                    timestamps = [record['timestamp'] for record in ohlcv_data]
+                    last_timestamp = min(timestamps)
+                    
+                    logger.info(f"Batch {batch_num}: fetched {len(ohlcv_data)} records, stored {stored_count}, earliest: {last_timestamp}")
+                    
+                    # 如果存储的数据少于获取的数据，说明有重复数据，可能需要停止
+                    if stored_count == 0:
+                        logger.info(f"Batch {batch_num}: no new records stored (likely duplicates), stopping")
+                        break
                 else:
-                    logger.warning(f"No klines data received for {interval}")
+                    logger.warning(f"Batch {batch_num}: no klines data received")
+                    break  # 没有更多数据了，停止获取
                 
-                # 间隔间短暂等待（Binance API限制较宽松）
-                if interval != intervals_to_fetch[-1][0]:  # 不是最后一个间隔
-                    logger.info("Waiting 2 seconds before next interval...")
-                    time.sleep(2)
+                # 批次间短暂等待
+                if batch_num < len(intervals_to_fetch):
+                    time.sleep(1)
                 
             except Exception as e:
-                logger.error(f"Error fetching {interval} klines for {symbol}: {str(e)}")
+                logger.error(f"Error fetching batch {batch_num} for {symbol}: {str(e)}")
                 continue
         
         if total_stored == 0:
@@ -921,6 +1000,17 @@ def fetch_historical_klines_bulk(symbol, interval, limit):
         return None
     except Exception as e:
         logger.error(f"Error fetching historical klines for {symbol} {interval}: {str(e)}")
+        return None
+
+def fetch_historical_klines_with_time(symbol, interval, limit, end_time):
+    """获取指定结束时间的历史K线数据"""
+    try:
+        klines = fetch_binance_klines_with_endtime(symbol, interval, limit, end_time)
+        if klines:
+            return convert_klines_to_ohlcv(klines)
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching historical klines with endTime for {symbol} {interval}: {str(e)}")
         return None
 
 def store_historical_klines_bulk(symbol, ohlcv_data, interval):
