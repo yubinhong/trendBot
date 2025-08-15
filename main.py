@@ -216,10 +216,7 @@ def determine_trend(indicators, timeframe="5m"):
         adx_strong_threshold = 20  # 长期时间框架可以用较低阈值
         adx_moderate_threshold = 15
         sma_diff_threshold = 0.02
-    elif timeframe == "1w":
-        adx_strong_threshold = 18
-        adx_moderate_threshold = 12
-        sma_diff_threshold = 0.03
+
     
     # Bandwidth analysis
     bandwidths = indicators.get('bandwidths', [])
@@ -511,7 +508,7 @@ def check_data_sufficiency(symbol):
             "can_analyze_1h": recent_count >= 240,    # 需要至少20小时数据
             "can_analyze_4h": total_count >= 1000,    # 需要至少3-4天数据
             "can_analyze_1d": total_count >= 2000,    # 需要至少7天数据
-            "can_analyze_1w": total_count >= 10000    # 需要至少35天数据
+
         }
         
         return sufficiency
@@ -526,8 +523,7 @@ def analyze_multiple_timeframes(symbol):
         "15m": {"minutes": 15, "name": "15分钟"},
         "1h": {"minutes": 60, "name": "1小时"},
         "4h": {"minutes": 240, "name": "4小时"}, 
-        "1d": {"minutes": 1440, "name": "1天"},
-        "1w": {"minutes": 10080, "name": "1周"}
+        "1d": {"minutes": 1440, "name": "1天"}
     }
     
     # 检查数据充足性
@@ -585,8 +581,7 @@ def get_trend_validity_period(timeframe, adx_strength):
         "15m": {"min": 1, "max": 4, "unit": "小时"},
         "1h": {"min": 4, "max": 24, "unit": "小时"},
         "4h": {"min": 1, "max": 7, "unit": "天"},
-        "1d": {"min": 1, "max": 4, "unit": "周"},
-        "1w": {"min": 1, "max": 6, "unit": "个月"}
+        "1d": {"min": 1, "max": 4, "unit": "周"}
     }
     
     if timeframe not in base_periods:
@@ -611,7 +606,7 @@ def get_trend_validity_period(timeframe, adx_strength):
 def generate_insight(symbol, trend, indicators=None, timeframe="5m"):
     timeframe_names = {
         "15m": "15分钟", "1h": "1小时", "4h": "4小时", 
-        "1d": "1天", "1w": "1周"
+        "1d": "1天"
     }
     
     tf_name = timeframe_names.get(timeframe, timeframe)
@@ -714,8 +709,7 @@ def store_trend_analysis(symbol, timeframe, trend, insight, adx_strength=0):
             "15m": 2 if adx_strength > 30 else 1,
             "1h": 12 if adx_strength > 30 else 6,
             "4h": 72 if adx_strength > 30 else 24,
-            "1d": 336 if adx_strength > 30 else 168,  # 2周 vs 1周
-            "1w": 2160 if adx_strength > 30 else 720   # 3个月 vs 1个月
+            "1d": 336 if adx_strength > 30 else 168  # 2周 vs 1周
         }.get(timeframe, 24)
         
         now = datetime.now()
@@ -864,13 +858,18 @@ def initialize_historical_data(symbol):
         else:
             logger.info(f"{symbol} has no historical data, attempting to fetch initial data")
         
-        # 使用Binance API获取大量历史数据（无严格限制）
-        intervals_to_fetch = [
-            ("1d", 1000),   # 最近1000个1天数据（约2.7年）
-            ("4h", 1000),   # 最近1000个4小时数据（约166天）
-            ("1h", 1000),   # 最近1000个1小时数据（约41天）
-            ("5m", 1000),   # 最近1000个5分钟数据（约3.5天）
-        ]
+        # 只获取5分钟数据，然后基于这些数据聚合计算其他时间框架
+        # 删除1周分析后，我们只需要支持到1天趋势
+        # 1天趋势的SMA200需要200天数据 = 200 * 288个5分钟数据点 = 57600个数据点
+        # 为了安全起见，我们获取约60天的5分钟数据
+        
+        # 分批获取5分钟数据（Binance限制每次最多1000条）
+        total_5min_needed = 17280  # 60天的5分钟数据 (60 * 24 * 60 / 5)
+        batches_needed = (total_5min_needed + 999) // 1000  # 向上取整，约18批
+        
+        logger.info(f"Will fetch {batches_needed} batches of 5min data (total ~{total_5min_needed} records, ~60 days)")
+        
+        intervals_to_fetch = [("5m", 1000)] * batches_needed
         
         total_stored = 0
         
@@ -1015,7 +1014,7 @@ def store_historical_klines_bulk(symbol, ohlcv_data, interval):
         return 0
 
 def cleanup_old_data():
-    """清理90天前的数据"""
+    """清理旧数据，保留足够支持1天趋势分析的数据"""
     try:
         conn = mysql.connector.connect(
             host=MYSQL_HOST,
@@ -1025,10 +1024,10 @@ def cleanup_old_data():
         )
         cursor = conn.cursor()
         
-        # 清理5分钟数据（保留90天）
+        # 清理5分钟数据（保留250天，确保1天趋势SMA200有足够数据）
         cursor.execute("""
             DELETE FROM crypto_5min_data 
-            WHERE timestamp < DATE_SUB(NOW(), INTERVAL 90 DAY)
+            WHERE timestamp < DATE_SUB(NOW(), INTERVAL 250 DAY)
         """)
         deleted_5min = cursor.rowcount
         
@@ -1044,7 +1043,7 @@ def cleanup_old_data():
         conn.close()
         
         if deleted_5min > 0 or deleted_trends > 0:
-            logger.info(f"Cleaned up old data: {deleted_5min} 5min records, {deleted_trends} trend records")
+            logger.info(f"Cleaned up old data: {deleted_5min} 5min records (>250 days), {deleted_trends} trend records (>90 days)")
         
     except Exception as e:
         logger.error(f"Error cleaning up old data: {str(e)}")
@@ -1062,12 +1061,12 @@ def send_to_telegram(message):
 
 if __name__ == "__main__":
     symbols = ["BTC/USDT", "ETH/USDT"]
-    last_trends = {sym: {tf: None for tf in ["15m", "1h", "4h", "1d", "1w"]} for sym in symbols}
+    last_trends = {sym: {tf: None for tf in ["15m", "1h", "4h", "1d"]} for sym in symbols}
     
     logger.info("Multi-timeframe crypto trend bot started successfully...")
-    logger.info("Data strategy: Collect 5min data from API, calculate 15m/1h/4h/1d/1w trends from database")
-    logger.info("Monitoring timeframes: 15m, 1h, 4h, 1d, 1w")
-    logger.info("Data retention: 90 days, cleanup daily at midnight")
+    logger.info("Data strategy: Collect 5min data from API, calculate 15m/1h/4h/1d trends from database")
+    logger.info("Monitoring timeframes: 15m, 1h, 4h, 1d")
+    logger.info("Data retention: 250 days for 5min data, 90 days for trends, cleanup daily at midnight")
     
     # 首先确保数据库表存在
     logger.info("Setting up database tables...")
@@ -1127,7 +1126,7 @@ if __name__ == "__main__":
             sufficiency = check_data_sufficiency(symbol)
             if sufficiency:
                 available_timeframes = []
-                for tf in ["15m", "1h", "4h", "1d", "1w"]:
+                for tf in ["15m", "1h", "4h", "1d"]:
                     if sufficiency.get(f"can_analyze_{tf}", False):
                         available_timeframes.append(tf)
                 
@@ -1181,7 +1180,7 @@ if __name__ == "__main__":
                 all_insights[symbol] = symbol_insights
                 
                 # 检查是否有趋势变化
-                for timeframe in ["15m", "1h", "4h", "1d", "1w"]:
+                for timeframe in ["15m", "1h", "4h", "1d"]:
                     current_trend = symbol_trends.get(timeframe, "未知")
                     if current_trend != last_trends[symbol][timeframe]:
                         trend_changed = True
@@ -1204,10 +1203,10 @@ if __name__ == "__main__":
                     insights = all_insights[symbol]
                     
                     # 只显示主要时间框架
-                    main_timeframes = ["15m", "1h", "4h", "1d", "1w"]
+                    main_timeframes = ["15m", "1h", "4h", "1d"]
                     for tf in main_timeframes:
                         if tf in trends:
-                            tf_name = {"15m": "15分钟", "1h": "1小时", "4h": "4小时", "1d": "1天", "1w": "1周"}[tf]
+                            tf_name = {"15m": "15分钟", "1h": "1小时", "4h": "4小时", "1d": "1天"}[tf]
                             message += f"  {tf_name}: {trends[tf]}\n"
                     
                     # 添加1天的详细分析
