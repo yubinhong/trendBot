@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 sys.stdout.reconfigure(line_buffering=True)
 
 # Load environment variables for security
-TAAPI_KEY = os.getenv('TAAPI_KEY')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 MYSQL_HOST = os.getenv('MYSQL_HOST')
@@ -33,7 +32,7 @@ MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD')
 MYSQL_DB = os.getenv('MYSQL_DB')
 SKIP_INITIALIZATION = os.getenv('SKIP_INITIALIZATION', 'false').lower() == 'true'
 
-if not all([TAAPI_KEY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB]):
+if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB]):
     logger.error("Missing required environment variables.")
     raise ValueError("Missing required environment variables.")
 
@@ -57,84 +56,106 @@ except Exception as e:
     logger.error("Please check your database configuration and ensure MySQL is running")
     sys.exit(1)
 
-def fetch_taapi_data(symbol, interval="1h", max_retries=3):
-    url = "https://api.taapi.io/bulk"
-    payload = {
-        "secret": TAAPI_KEY,
-        "construct": {
-            "exchange": "binance",
-            "symbol": symbol,
-            "interval": interval,
-            "indicators": [
-                {"indicator": "sma", "period": 50, "id": "sma50"},
-                {"indicator": "sma", "period": 200, "id": "sma200"},
-                {"indicator": "dmi", "id": "dmi"},  # Default period 14 for ADX, +DI, -DI
-                {"indicator": "bbands", "results": 20, "id": "bbands"},  # Limited to 20 results
-                {"indicator": "atr", "results": 20, "id": "atr"},  # Limited to 20 results
-                {"indicator": "price", "id": "price"}  # Get current price data
-            ]
-        }
+def fetch_binance_klines(symbol, interval="5m", limit=1000, max_retries=3):
+    """从 Binance API 获取 K线数据"""
+    # 转换符号格式：BTC/USDT -> BTCUSDT
+    binance_symbol = symbol.replace('/', '')
+    
+    url = "https://api.binance.com/api/v3/klines"
+    params = {
+        "symbol": binance_symbol,
+        "interval": interval,
+        "limit": limit
     }
     
     for attempt in range(max_retries):
         try:
-            logger.debug(f"Fetching data for {symbol} (attempt {attempt + 1}/{max_retries})")
-            response = requests.post(url, json=payload, timeout=30)
+            logger.debug(f"Fetching {limit} {interval} klines for {symbol} (attempt {attempt + 1}/{max_retries})")
+            response = requests.get(url, params=params, timeout=30)
             
             if response.status_code == 200:
-                logger.debug(f"Successfully fetched data for {symbol}")
-                return response.json()['data']
+                klines = response.json()
+                logger.debug(f"Successfully fetched {len(klines)} klines for {symbol}")
+                return klines
             elif response.status_code == 429:  # Rate limit
-                wait_time = (attempt + 1) * 10  # Exponential backoff
-                logger.warning(f"Rate limit hit for {symbol}, waiting {wait_time} seconds...")
+                wait_time = (attempt + 1) * 5
+                logger.warning(f"Binance rate limit hit for {symbol}, waiting {wait_time} seconds...")
                 time.sleep(wait_time)
                 continue
             else:
-                logger.error(f"TAAPI error for {symbol}: {response.text}")
-                if attempt == max_retries - 1:  # Last attempt
-                    raise Exception(f"TAAPI error for {symbol}: {response.text}")
-                time.sleep(5)  # Wait before retry
+                logger.error(f"Binance API error for {symbol}: {response.text}")
+                if attempt == max_retries - 1:
+                    raise Exception(f"Binance API error for {symbol}: {response.text}")
+                time.sleep(2)
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"Request error for {symbol}: {str(e)}")
-            if attempt == max_retries - 1:  # Last attempt
+            if attempt == max_retries - 1:
                 raise Exception(f"Request error for {symbol}: {str(e)}")
-            time.sleep(5)  # Wait before retry
+            time.sleep(2)
     
-    raise Exception(f"Failed to fetch data for {symbol} after {max_retries} attempts")
+    raise Exception(f"Failed to fetch klines for {symbol} after {max_retries} attempts")
 
-def parse_indicators(data):
-    indicators = {}
-    for item in data:
-        ind_id = item['id']
-        result = item['result']
-        if isinstance(result, list):
-            # For historical data (bbands, atr), assume ordered oldest to newest, last is current
-            if ind_id == 'bbands':
-                bandwidths = [
-                    (r['valueUpperBand'] - r['valueLowerBand']) / r['valueMiddleBand'] * 100
-                    if r['valueMiddleBand'] != 0 else 0 for r in result
-                ]
-                indicators['bandwidths'] = bandwidths
-            elif ind_id == 'atr':
-                atr_values = [r['value'] for r in result]
-                indicators['atr_values'] = atr_values
-        else:
-            # For single results
-            if ind_id in ['sma50', 'sma200']:
-                indicators[ind_id] = result['value']
-            elif ind_id == 'dmi':
-                indicators['adx'] = result['adx']
-                indicators['pdi'] = result['pdi']
-                indicators['mdi'] = result['mdi']
-            elif ind_id == 'price':
-                indicators['price'] = result['value']
-                indicators['open'] = result.get('open', result['value'])
-                indicators['high'] = result.get('high', result['value'])
-                indicators['low'] = result.get('low', result['value'])
-                indicators['close'] = result['value']
-                indicators['volume'] = result.get('volume', 0)
-    return indicators
+def convert_klines_to_ohlcv(klines):
+    """将 Binance K线数据转换为 OHLCV 格式"""
+    ohlcv_data = []
+    
+    for kline in klines:
+        try:
+            # Binance kline format: [timestamp, open, high, low, close, volume, ...]
+            timestamp = datetime.fromtimestamp(int(kline[0]) / 1000)  # 毫秒转秒
+            open_price = float(kline[1])
+            high_price = float(kline[2])
+            low_price = float(kline[3])
+            close_price = float(kline[4])
+            volume = float(kline[5])
+            
+            ohlcv_data.append({
+                'timestamp': timestamp,
+                'open': open_price,
+                'high': high_price,
+                'low': low_price,
+                'close': close_price,
+                'volume': volume
+            })
+        except (ValueError, IndexError) as e:
+            logger.warning(f"Error parsing kline data: {str(e)}")
+            continue
+    
+    return ohlcv_data
+
+def fetch_current_5min_data(symbol):
+    """获取最新的5分钟数据并计算技术指标"""
+    try:
+        # 获取最近的K线数据（包含足够的历史数据用于指标计算）
+        klines = fetch_binance_klines(symbol, "5m", limit=300)  # 获取300个5分钟数据
+        
+        if not klines:
+            logger.error(f"No klines data received for {symbol}")
+            return None
+        
+        # 转换为OHLCV格式
+        ohlcv_data = convert_klines_to_ohlcv(klines)
+        
+        if len(ohlcv_data) < 200:
+            logger.warning(f"Insufficient klines data for {symbol}: {len(ohlcv_data)} records")
+            return None
+        
+        # 计算技术指标
+        indicators = calculate_technical_indicators(ohlcv_data)
+        
+        if indicators is None:
+            logger.error(f"Failed to calculate indicators for {symbol}")
+            return None
+        
+        logger.debug(f"Successfully processed 5min data for {symbol}")
+        return indicators
+        
+    except Exception as e:
+        logger.error(f"Error fetching current 5min data for {symbol}: {str(e)}")
+        return None
+
+
 
 def get_historical_data(symbol, minutes_back):
     """从数据库获取历史数据用于多时间框架分析"""
@@ -843,52 +864,38 @@ def initialize_historical_data(symbol):
         else:
             logger.info(f"{symbol} has no historical data, attempting to fetch initial data")
         
-        # 获取不同时间间隔的历史数据来快速填充（受API限制，每次最多20个结果）
-        # 由于速率限制严格，我们采用更保守的策略
+        # 使用Binance API获取大量历史数据（无严格限制）
         intervals_to_fetch = [
-            ("1d", 20),    # 最近20个1天数据（优先获取长期数据）
-            ("4h", 20),    # 最近20个4小时数据
-            ("1h", 20),    # 最近20个1小时数据
+            ("1d", 1000),   # 最近1000个1天数据（约2.7年）
+            ("4h", 1000),   # 最近1000个4小时数据（约166天）
+            ("1h", 1000),   # 最近1000个1小时数据（约41天）
+            ("5m", 1000),   # 最近1000个5分钟数据（约3.5天）
         ]
         
         total_stored = 0
         
-        for interval, batch_size in intervals_to_fetch:
+        for interval, limit in intervals_to_fetch:
             try:
-                logger.info(f"Fetching {batch_size} {interval} historical data for {symbol}")
+                logger.info(f"Fetching {limit} {interval} historical klines for {symbol}")
                 
-                # 由于API速率限制严格，只获取一批数据
-                try:
-                    logger.info(f"Fetching {batch_size} {interval} historical data for {symbol}")
-                    
-                    # 获取历史数据
-                    historical_data = fetch_historical_data_bulk(symbol, interval, batch_size)
-                    
-                    if historical_data:
-                        # 转换并存储数据
-                        stored_count = store_historical_data_bulk(symbol, historical_data, interval, 0)
-                        total_stored += stored_count
-                        logger.info(f"Successfully stored {stored_count} {interval} records")
-                    else:
-                        logger.warning(f"No data received for {interval}")
-                        
-                except Exception as e:
-                    logger.warning(f"Error fetching {interval} data: {str(e)}")
-                    # 如果遇到速率限制，等待更长时间
-                    if "rate-limit" in str(e).lower():
-                        logger.info("Rate limit hit, waiting 60 seconds before continuing...")
-                        time.sleep(60)
-                    continue
+                # 获取历史K线数据
+                ohlcv_data = fetch_historical_klines_bulk(symbol, interval, limit)
                 
-                logger.info(f"Completed fetching {interval} data for {symbol}")
+                if ohlcv_data:
+                    # 存储数据
+                    stored_count = store_historical_klines_bulk(symbol, ohlcv_data, interval)
+                    total_stored += stored_count
+                    logger.info(f"Successfully stored {stored_count} records from {interval} klines")
+                else:
+                    logger.warning(f"No klines data received for {interval}")
                 
-                # 时间间隔间等待更长时间
+                # 间隔间短暂等待（Binance API限制较宽松）
                 if interval != intervals_to_fetch[-1][0]:  # 不是最后一个间隔
-                    logger.info("Waiting 45 seconds before next interval to avoid rate limits...")
-                    time.sleep(45)
+                    logger.info("Waiting 2 seconds before next interval...")
+                    time.sleep(2)
                 
             except Exception as e:
-                logger.error(f"Error fetching {interval} data for {symbol}: {str(e)}")
+                logger.error(f"Error fetching {interval} klines for {symbol}: {str(e)}")
                 continue
         
         if total_stored == 0:
@@ -906,38 +913,20 @@ def initialize_historical_data(symbol):
         logger.error(f"Error initializing historical data for {symbol}: {str(e)}")
         return False
 
-def fetch_historical_data_bulk(symbol, interval, limit):
-    """批量获取历史数据"""
-    url = "https://api.taapi.io/bulk"
-    payload = {
-        "secret": TAAPI_KEY,
-        "construct": {
-            "exchange": "binance",
-            "symbol": symbol,
-            "interval": interval,
-            "indicators": [
-                {"indicator": "price", "results": limit, "id": "price_history"}
-            ]
-        }
-    }
-    
+def fetch_historical_klines_bulk(symbol, interval, limit):
+    """批量获取历史K线数据"""
     try:
-        response = requests.post(url, json=payload, timeout=60)
-        if response.status_code == 200:
-            data = response.json()['data']
-            for item in data:
-                if item['id'] == 'price_history':
-                    return item['result']
-        else:
-            logger.error(f"API error fetching {interval} history for {symbol}: {response.text}")
-            return None
+        klines = fetch_binance_klines(symbol, interval, limit)
+        if klines:
+            return convert_klines_to_ohlcv(klines)
+        return None
     except Exception as e:
-        logger.error(f"Request error fetching {interval} history for {symbol}: {str(e)}")
+        logger.error(f"Error fetching historical klines for {symbol} {interval}: {str(e)}")
         return None
 
-def store_historical_data_bulk(symbol, historical_data, interval, batch_offset=0):
-    """批量存储历史数据"""
-    if not historical_data:
+def store_historical_klines_bulk(symbol, ohlcv_data, interval):
+    """批量存储历史K线数据"""
+    if not ohlcv_data:
         return 0
     
     try:
@@ -951,51 +940,69 @@ def store_historical_data_bulk(symbol, historical_data, interval, batch_offset=0
         
         stored_count = 0
         
-        # 将不同时间间隔的数据转换为5分钟数据点
-        for record in historical_data:
-            try:
-                # 解析时间戳
-                if 'timestamp' in record:
-                    timestamp = datetime.fromtimestamp(record['timestamp'])
-                else:
-                    continue
-                
-                # 根据时间间隔创建多个5分钟数据点
-                interval_minutes = {
-                    "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440
-                }.get(interval, 5)
-                
-                # 为了快速填充数据，我们将较大时间间隔的数据分解为多个5分钟点
-                points_per_interval = max(1, interval_minutes // 5)
-                
-                # 添加批次偏移，避免重复时间戳
-                base_offset_minutes = batch_offset * interval_minutes
-                
-                for i in range(points_per_interval):
-                    point_timestamp = timestamp - pd.Timedelta(minutes=base_offset_minutes + i*5)
-                    
+        # 如果是5分钟数据，直接存储
+        if interval == "5m":
+            for record in ohlcv_data:
+                try:
                     cursor.execute("""
                         INSERT IGNORE INTO crypto_5min_data 
                         (symbol, timestamp, interval_type, price, open_price, high_price, low_price, close_price, volume, 
                          adx, pdi, mdi, sma50, sma200, bandwidth, atr)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
-                        symbol, point_timestamp, "5m",
-                        record.get('value', 0),
-                        record.get('open', record.get('value', 0)),
-                        record.get('high', record.get('value', 0)),
-                        record.get('low', record.get('value', 0)),
-                        record.get('value', 0),  # close
-                        record.get('volume', 0),
+                        symbol, record['timestamp'], "5m",
+                        record['close'],  # price
+                        record['open'],
+                        record['high'],
+                        record['low'],
+                        record['close'],
+                        record['volume'],
                         0, 0, 0, 0, 0, 0, 0  # 技术指标稍后计算
                     ))
                     
                     if cursor.rowcount > 0:
                         stored_count += 1
                         
-            except Exception as e:
-                logger.warning(f"Error storing historical record: {str(e)}")
-                continue
+                except Exception as e:
+                    logger.warning(f"Error storing kline record: {str(e)}")
+                    continue
+        else:
+            # 对于其他时间间隔，分解为5分钟数据点
+            interval_minutes = {
+                "15m": 15, "1h": 60, "4h": 240, "1d": 1440
+            }.get(interval, 5)
+            
+            points_per_interval = max(1, interval_minutes // 5)
+            
+            for record in ohlcv_data:
+                try:
+                    base_timestamp = record['timestamp']
+                    
+                    for i in range(points_per_interval):
+                        point_timestamp = base_timestamp + pd.Timedelta(minutes=i*5)
+                        
+                        cursor.execute("""
+                            INSERT IGNORE INTO crypto_5min_data 
+                            (symbol, timestamp, interval_type, price, open_price, high_price, low_price, close_price, volume, 
+                             adx, pdi, mdi, sma50, sma200, bandwidth, atr)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            symbol, point_timestamp, "5m",
+                            record['close'],  # price
+                            record['open'],
+                            record['high'],
+                            record['low'],
+                            record['close'],
+                            record['volume'],
+                            0, 0, 0, 0, 0, 0, 0  # 技术指标稍后计算
+                        ))
+                        
+                        if cursor.rowcount > 0:
+                            stored_count += 1
+                            
+                except Exception as e:
+                    logger.warning(f"Error storing expanded kline record: {str(e)}")
+                    continue
         
         conn.commit()
         cursor.close()
@@ -1004,7 +1011,7 @@ def store_historical_data_bulk(symbol, historical_data, interval, batch_offset=0
         return stored_count
         
     except Exception as e:
-        logger.error(f"Error storing historical data bulk: {str(e)}")
+        logger.error(f"Error storing historical klines bulk: {str(e)}")
         return 0
 
 def cleanup_old_data():
@@ -1091,10 +1098,10 @@ if __name__ == "__main__":
                 else:
                     logger.warning(f"⚠ Limited initialization for {symbol} - will accumulate data over time")
                 
-                # 符号间等待更长时间避免API限制
+                # 符号间短暂等待（Binance API限制宽松）
                 if symbol != symbols[-1]:  # 不是最后一个符号
-                    logger.info("Waiting 60 seconds before next symbol to avoid API limits...")
-                    time.sleep(60)
+                    logger.info("Waiting 5 seconds before next symbol...")
+                    time.sleep(5)
                     
             except Exception as e:
                 logger.error(f"Error during initialization for {symbol}: {str(e)}")
@@ -1150,20 +1157,23 @@ if __name__ == "__main__":
             for i, symbol in enumerate(symbols):
                 logger.info(f"Analyzing {symbol} across multiple timeframes...")
                 
-                # Add delay between symbols to avoid rate limiting
+                # Add minimal delay between symbols (Binance API is more generous)
                 if i > 0:
-                    logger.info("Waiting 10 seconds to avoid rate limit...")
-                    time.sleep(10)
+                    logger.info("Waiting 2 seconds before next symbol...")
+                    time.sleep(2)
                 
-                # 首先获取5分钟数据并存储（这是唯一的API调用）
+                # 获取最新的5分钟数据并存储
                 try:
-                    data_5m = fetch_taapi_data(symbol, "5m")
-                    indicators_5m = parse_indicators(data_5m)
-                    store_5min_data(symbol, indicators_5m, "5m")
-                    logger.info(f"Stored 5min data for {symbol}")
+                    indicators_5m = fetch_current_5min_data(symbol)
+                    if indicators_5m:
+                        store_5min_data(symbol, indicators_5m, "5m")
+                        logger.info(f"Stored latest 5min data for {symbol}")
+                    else:
+                        logger.error(f"Failed to get 5min data for {symbol}")
+                        continue  # 如果无法获取5分钟数据，跳过这个symbol
                 except Exception as e:
-                    logger.error(f"Failed to store 5min data for {symbol}: {str(e)}")
-                    continue  # 如果无法获取5分钟数据，跳过这个symbol
+                    logger.error(f"Failed to process 5min data for {symbol}: {str(e)}")
+                    continue
                 
                 # 基于数据库中的5分钟数据分析多个时间框架
                 symbol_trends, symbol_insights = analyze_multiple_timeframes(symbol)
@@ -1178,9 +1188,9 @@ if __name__ == "__main__":
                         logger.info(f"{symbol} [{timeframe}] 趋势变化: {last_trends[symbol][timeframe]} -> {current_trend}")
                         last_trends[symbol][timeframe] = current_trend
                 
-                # 添加延迟避免API限制
-                logger.info("Waiting 15 seconds before next symbol...")
-                time.sleep(15)
+                # 添加短暂延迟（Binance API限制宽松）
+                logger.info("Waiting 3 seconds before next symbol...")
+                time.sleep(3)
             
             # 发送通知（如果有趋势变化）
             if trend_changed:
