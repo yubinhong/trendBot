@@ -437,6 +437,52 @@ def calculate_technical_indicators(ohlcv_data):
         logger.error(f"Error calculating technical indicators with pandas-ta: {str(e)}")
         return None
 
+def check_data_sufficiency(symbol):
+    """检查数据是否足够进行分析"""
+    try:
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB
+        )
+        cursor = conn.cursor()
+        
+        # 检查最近7天的数据量
+        cursor.execute("""
+            SELECT COUNT(*) FROM crypto_5min_data 
+            WHERE symbol = %s AND timestamp >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+        """, (symbol,))
+        
+        recent_count = cursor.fetchone()[0]
+        
+        # 检查总数据量
+        cursor.execute("""
+            SELECT COUNT(*) FROM crypto_5min_data WHERE symbol = %s
+        """, (symbol,))
+        
+        total_count = cursor.fetchone()[0]
+        
+        cursor.close()
+        conn.close()
+        
+        # 评估数据充足性
+        sufficiency = {
+            "total_records": total_count,
+            "recent_records": recent_count,
+            "can_analyze_15m": recent_count >= 60,    # 需要至少5小时数据
+            "can_analyze_1h": recent_count >= 240,    # 需要至少20小时数据
+            "can_analyze_4h": total_count >= 1000,    # 需要至少3-4天数据
+            "can_analyze_1d": total_count >= 2000,    # 需要至少7天数据
+            "can_analyze_1w": total_count >= 10000    # 需要至少35天数据
+        }
+        
+        return sufficiency
+        
+    except Exception as e:
+        logger.error(f"Error checking data sufficiency for {symbol}: {str(e)}")
+        return None
+
 def analyze_multiple_timeframes(symbol):
     """基于数据库中的5分钟数据分析多个时间框架的趋势"""
     timeframes = {
@@ -447,11 +493,24 @@ def analyze_multiple_timeframes(symbol):
         "1w": {"minutes": 10080, "name": "1周"}
     }
     
+    # 检查数据充足性
+    data_sufficiency = check_data_sufficiency(symbol)
+    if data_sufficiency:
+        logger.info(f"{symbol} data status: {data_sufficiency['total_records']} total, {data_sufficiency['recent_records']} recent")
+    
     trends = {}
     insights = {}
     
     for tf, config in timeframes.items():
         try:
+            # 检查该时间框架是否有足够数据
+            can_analyze_key = f"can_analyze_{tf}"
+            if data_sufficiency and not data_sufficiency.get(can_analyze_key, False):
+                logger.warning(f"Insufficient data for {symbol} {tf} analysis")
+                trends[tf] = "数据积累中"
+                insights[tf] = f"[{config['name']}]数据积累中，请等待更多数据收集后再分析"
+                continue
+            
             logger.info(f"Calculating {config['name']} indicators from 5min data for {symbol}")
             
             # 基于5分钟数据计算指定时间框架的指标
@@ -460,7 +519,7 @@ def analyze_multiple_timeframes(symbol):
             if indicators is None:
                 logger.warning(f"Could not calculate indicators for {symbol} {tf}")
                 trends[tf] = "数据不足"
-                insights[tf] = f"[{config['name']}]数据不足，无法分析趋势"
+                insights[tf] = f"[{config['name']}]数据不足，无法分析趋势。建议等待更多数据积累。"
                 continue
             
             # 判断趋势
@@ -470,8 +529,9 @@ def analyze_multiple_timeframes(symbol):
             trends[tf] = trend
             insights[tf] = insight
             
-            # 存储趋势分析
-            store_trend_analysis(symbol, tf, trend, insight)
+            # 存储趋势分析（包含ADX强度用于有效期计算）
+            adx_strength = indicators.get('adx', 0) if indicators else 0
+            store_trend_analysis(symbol, tf, trend, insight, adx_strength)
             
             logger.info(f"{symbol} [{config['name']}] 趋势: {trend}")
             
@@ -482,6 +542,35 @@ def analyze_multiple_timeframes(symbol):
     
     return trends, insights
 
+def get_trend_validity_period(timeframe, adx_strength):
+    """估算趋势预测的有效期"""
+    base_periods = {
+        "15m": {"min": 1, "max": 4, "unit": "小时"},
+        "1h": {"min": 4, "max": 24, "unit": "小时"},
+        "4h": {"min": 1, "max": 7, "unit": "天"},
+        "1d": {"min": 1, "max": 4, "unit": "周"},
+        "1w": {"min": 1, "max": 6, "unit": "个月"}
+    }
+    
+    if timeframe not in base_periods:
+        return "未知"
+    
+    period = base_periods[timeframe]
+    
+    # 根据ADX强度调整有效期
+    if adx_strength > 30:  # 强趋势
+        validity = f"{period['max']}{period['unit']}"
+        confidence = "高"
+    elif adx_strength > 20:  # 中等趋势
+        mid_period = (period['min'] + period['max']) // 2
+        validity = f"{mid_period}{period['unit']}"
+        confidence = "中等"
+    else:  # 弱趋势
+        validity = f"{period['min']}{period['unit']}"
+        confidence = "低"
+    
+    return f"预期有效期{validity}(置信度:{confidence})"
+
 def generate_insight(symbol, trend, indicators=None, timeframe="5m"):
     timeframe_names = {
         "15m": "15分钟", "1h": "1小时", "4h": "4小时", 
@@ -490,10 +579,21 @@ def generate_insight(symbol, trend, indicators=None, timeframe="5m"):
     
     tf_name = timeframe_names.get(timeframe, timeframe)
     
+    # 获取ADX强度用于有效期估算
+    adx_strength = indicators.get('adx', 0) if indicators else 0
+    validity_info = get_trend_validity_period(timeframe, adx_strength)
+    
+    # 添加风险提醒
+    risk_warning = ""
+    if timeframe in ["15m", "1h"]:
+        risk_warning = "⚠️短期趋势易受突发事件影响"
+    elif adx_strength < 20:
+        risk_warning = "⚠️趋势强度较弱，注意反转风险"
+    
     base_insights = {
-        "上涨趋势": f"[{tf_name}]基于当前强势ADX和+DI主导，预计继续上涨趋势，可能测试更高阻力位。",
-        "下跌趋势": f"[{tf_name}]当前-DI主导且SMA交叉向下，预计延续下跌，关注支撑位。",
-        "区间/波动小": f"[{tf_name}]ADX低位且波动率低，预计维持震荡，等待突破信号。"
+        "上涨趋势": f"[{tf_name}]基于当前强势ADX和+DI主导，预计继续上涨趋势，可能测试更高阻力位。{validity_info}。{risk_warning}",
+        "下跌趋势": f"[{tf_name}]当前-DI主导且SMA交叉向下，预计延续下跌，关注支撑位。{validity_info}。{risk_warning}",
+        "区间/波动小": f"[{tf_name}]ADX低位且波动率低，预计维持震荡，等待突破信号。{validity_info}。{risk_warning}"
     }
     
     if trend in base_insights:
@@ -516,9 +616,9 @@ def generate_insight(symbol, trend, indicators=None, timeframe="5m"):
                 details.append("短长期均线接近，缺乏明确方向")
             
             if details:
-                return f"[{tf_name}]当前信号混合：{'; '.join(details)}。建议等待更明确的突破信号。"
+                return f"[{tf_name}]当前信号混合：{'; '.join(details)}。{validity_info}。建议等待更明确的突破信号。"
         
-        return f"[{tf_name}]趋势信号混合，建议观察关键技术位突破情况。"
+        return f"[{tf_name}]趋势信号混合，建议观察关键技术位突破情况。{validity_info}。"
 
 def store_5min_data(symbol, indicators, interval="5m"):
     """存储5分钟原始数据"""
@@ -585,8 +685,8 @@ def store_5min_data(symbol, indicators, interval="5m"):
         logger.error(f"MySQL error storing 5min data for {symbol}: {str(e)}")
         raise
 
-def store_trend_analysis(symbol, timeframe, trend, insight):
-    """存储不同时间框架的趋势分析"""
+def store_trend_analysis(symbol, timeframe, trend, insight, adx_strength=0):
+    """存储不同时间框架的趋势分析，包含有效期信息"""
     try:
         conn = mysql.connector.connect(
             host=MYSQL_HOST,
@@ -596,7 +696,7 @@ def store_trend_analysis(symbol, timeframe, trend, insight):
         )
         cursor = conn.cursor()
         
-        # Create trends table
+        # Create trends table with validity tracking
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS crypto_trends (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -605,25 +705,258 @@ def store_trend_analysis(symbol, timeframe, trend, insight):
                 timestamp DATETIME,
                 trend VARCHAR(50),
                 insight TEXT,
+                adx_strength FLOAT,
+                expected_validity_hours INT,
+                is_expired BOOLEAN DEFAULT FALSE,
                 UNIQUE KEY unique_trend (symbol, timeframe, timestamp)
             )
         """)
         
+        # 计算预期有效期（小时）
+        validity_hours = {
+            "15m": 2 if adx_strength > 30 else 1,
+            "1h": 12 if adx_strength > 30 else 6,
+            "4h": 72 if adx_strength > 30 else 24,
+            "1d": 336 if adx_strength > 30 else 168,  # 2周 vs 1周
+            "1w": 2160 if adx_strength > 30 else 720   # 3个月 vs 1个月
+        }.get(timeframe, 24)
+        
         now = datetime.now()
         cursor.execute("""
-            INSERT INTO crypto_trends (symbol, timeframe, timestamp, trend, insight)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO crypto_trends (symbol, timeframe, timestamp, trend, insight, adx_strength, expected_validity_hours)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
-            trend=VALUES(trend), insight=VALUES(insight)
-        """, (symbol, timeframe, now, trend, insight))
+            trend=VALUES(trend), insight=VALUES(insight), adx_strength=VALUES(adx_strength), 
+            expected_validity_hours=VALUES(expected_validity_hours), is_expired=FALSE
+        """, (symbol, timeframe, now, trend, insight, adx_strength, validity_hours))
         
         conn.commit()
         cursor.close()
         conn.close()
-        logger.debug(f"Successfully stored trend analysis for {symbol} {timeframe}")
+        logger.debug(f"Successfully stored trend analysis for {symbol} {timeframe} (validity: {validity_hours}h)")
     except Exception as e:
         logger.error(f"MySQL error storing trend for {symbol} {timeframe}: {str(e)}")
         raise
+
+def check_expired_trends():
+    """检查并标记过期的趋势预测"""
+    try:
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB
+        )
+        cursor = conn.cursor()
+        
+        # 标记过期的趋势
+        cursor.execute("""
+            UPDATE crypto_trends 
+            SET is_expired = TRUE 
+            WHERE is_expired = FALSE 
+            AND TIMESTAMPDIFF(HOUR, timestamp, NOW()) > expected_validity_hours
+        """)
+        
+        expired_count = cursor.rowcount
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        if expired_count > 0:
+            logger.info(f"Marked {expired_count} trend predictions as expired")
+            
+    except Exception as e:
+        logger.error(f"Error checking expired trends: {str(e)}")
+
+def initialize_historical_data(symbol):
+    """初始化时获取足够的历史数据"""
+    try:
+        logger.info(f"Initializing historical data for {symbol}...")
+        
+        # 检查现有数据量
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB
+        )
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT COUNT(*) FROM crypto_5min_data 
+            WHERE symbol = %s AND timestamp >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+        """, (symbol,))
+        
+        existing_count = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        
+        # 如果已有足够数据（7天约2016个5分钟数据点），跳过初始化
+        if existing_count >= 1500:
+            logger.info(f"{symbol} already has sufficient data ({existing_count} records)")
+            return True
+        
+        logger.info(f"{symbol} has {existing_count} records, need to fetch historical data")
+        
+        # 获取不同时间间隔的历史数据来快速填充
+        intervals_to_fetch = [
+            ("5m", 500),   # 最近500个5分钟数据
+            ("15m", 200),  # 最近200个15分钟数据  
+            ("1h", 100),   # 最近100个1小时数据
+            ("4h", 50),    # 最近50个4小时数据
+        ]
+        
+        total_stored = 0
+        
+        for interval, limit in intervals_to_fetch:
+            try:
+                logger.info(f"Fetching {limit} {interval} historical data for {symbol}")
+                
+                # 获取历史数据
+                historical_data = fetch_historical_data_bulk(symbol, interval, limit)
+                
+                if historical_data:
+                    # 转换并存储数据
+                    stored_count = store_historical_data_bulk(symbol, historical_data, interval)
+                    total_stored += stored_count
+                    logger.info(f"Stored {stored_count} {interval} records for {symbol}")
+                
+                # 避免API限制
+                time.sleep(3)
+                
+            except Exception as e:
+                logger.error(f"Error fetching {interval} data for {symbol}: {str(e)}")
+                continue
+        
+        logger.info(f"Historical data initialization completed for {symbol}: {total_stored} total records")
+        return total_stored > 0
+        
+    except Exception as e:
+        logger.error(f"Error initializing historical data for {symbol}: {str(e)}")
+        return False
+
+def fetch_historical_data_bulk(symbol, interval, limit):
+    """批量获取历史数据"""
+    url = "https://api.taapi.io/bulk"
+    payload = {
+        "secret": TAAPI_KEY,
+        "construct": {
+            "exchange": "binance",
+            "symbol": symbol,
+            "interval": interval,
+            "indicators": [
+                {"indicator": "price", "results": limit, "id": "price_history"}
+            ]
+        }
+    }
+    
+    try:
+        response = requests.post(url, json=payload, timeout=60)
+        if response.status_code == 200:
+            data = response.json()['data']
+            for item in data:
+                if item['id'] == 'price_history':
+                    return item['result']
+        else:
+            logger.error(f"API error fetching {interval} history for {symbol}: {response.text}")
+            return None
+    except Exception as e:
+        logger.error(f"Request error fetching {interval} history for {symbol}: {str(e)}")
+        return None
+
+def store_historical_data_bulk(symbol, historical_data, interval):
+    """批量存储历史数据"""
+    if not historical_data:
+        return 0
+    
+    try:
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB
+        )
+        cursor = conn.cursor()
+        
+        # 确保表存在
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crypto_5min_data (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                symbol VARCHAR(20),
+                timestamp DATETIME,
+                interval_type VARCHAR(10),
+                price FLOAT,
+                open_price FLOAT,
+                high_price FLOAT,
+                low_price FLOAT,
+                close_price FLOAT,
+                volume FLOAT,
+                adx FLOAT,
+                pdi FLOAT,
+                mdi FLOAT,
+                sma50 FLOAT,
+                sma200 FLOAT,
+                bandwidth FLOAT,
+                atr FLOAT,
+                UNIQUE KEY unique_record (symbol, timestamp, interval_type)
+            )
+        """)
+        
+        stored_count = 0
+        
+        # 将不同时间间隔的数据转换为5分钟数据点
+        for record in historical_data:
+            try:
+                # 解析时间戳
+                if 'timestamp' in record:
+                    timestamp = datetime.fromtimestamp(record['timestamp'])
+                else:
+                    continue
+                
+                # 根据时间间隔创建多个5分钟数据点
+                interval_minutes = {
+                    "5m": 5, "15m": 15, "1h": 60, "4h": 240
+                }.get(interval, 5)
+                
+                # 为了快速填充数据，我们将较大时间间隔的数据分解为多个5分钟点
+                points_per_interval = max(1, interval_minutes // 5)
+                
+                for i in range(points_per_interval):
+                    point_timestamp = timestamp + pd.Timedelta(minutes=i*5)
+                    
+                    cursor.execute("""
+                        INSERT IGNORE INTO crypto_5min_data 
+                        (symbol, timestamp, interval_type, price, open_price, high_price, low_price, close_price, volume, 
+                         adx, pdi, mdi, sma50, sma200, bandwidth, atr)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        symbol, point_timestamp, "5m",
+                        record.get('value', 0),
+                        record.get('open', record.get('value', 0)),
+                        record.get('high', record.get('value', 0)),
+                        record.get('low', record.get('value', 0)),
+                        record.get('value', 0),  # close
+                        record.get('volume', 0),
+                        0, 0, 0, 0, 0, 0, 0  # 技术指标稍后计算
+                    ))
+                    
+                    if cursor.rowcount > 0:
+                        stored_count += 1
+                        
+            except Exception as e:
+                logger.warning(f"Error storing historical record: {str(e)}")
+                continue
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return stored_count
+        
+    except Exception as e:
+        logger.error(f"Error storing historical data bulk: {str(e)}")
+        return 0
 
 def cleanup_old_data():
     """清理90天前的数据"""
@@ -680,6 +1013,48 @@ if __name__ == "__main__":
     logger.info("Monitoring timeframes: 15m, 1h, 4h, 1d, 1w")
     logger.info("Data retention: 90 days, cleanup daily at midnight")
     
+    # 初始化历史数据
+    logger.info("Checking and initializing historical data...")
+    initialization_success = True
+    
+    for symbol in symbols:
+        try:
+            success = initialize_historical_data(symbol)
+            if not success:
+                logger.warning(f"Failed to initialize historical data for {symbol}")
+                initialization_success = False
+            time.sleep(5)  # 避免API限制
+        except Exception as e:
+            logger.error(f"Error during initialization for {symbol}: {str(e)}")
+            initialization_success = False
+    
+    if initialization_success:
+        logger.info("Historical data initialization completed successfully")
+        logger.info("All timeframes should be available for analysis")
+    else:
+        logger.warning("Some historical data initialization failed")
+        logger.info("System will start with limited analysis capabilities")
+        logger.info("More timeframes will become available as data accumulates")
+    
+    # 显示当前数据状态
+    for symbol in symbols:
+        try:
+            sufficiency = check_data_sufficiency(symbol)
+            if sufficiency:
+                available_timeframes = []
+                for tf in ["15m", "1h", "4h", "1d", "1w"]:
+                    if sufficiency.get(f"can_analyze_{tf}", False):
+                        available_timeframes.append(tf)
+                
+                if available_timeframes:
+                    logger.info(f"{symbol} - Available timeframes: {', '.join(available_timeframes)}")
+                else:
+                    logger.info(f"{symbol} - No timeframes ready yet, will accumulate data")
+        except Exception as e:
+            logger.error(f"Error checking initial data status for {symbol}: {str(e)}")
+    
+    logger.info("Starting main monitoring loop...")
+    
     while True:
         try:
             logger.info("Starting new multi-timeframe analysis cycle...")
@@ -687,11 +1062,12 @@ if __name__ == "__main__":
             all_insights = {}
             trend_changed = False
             
-            # 每天清理一次旧数据（在第一次运行时）
+            # 每天清理一次旧数据和检查过期趋势
             current_hour = datetime.now().hour
             if current_hour == 0:  # 每天午夜清理
                 logger.info("Performing daily data cleanup...")
                 cleanup_old_data()
+                check_expired_trends()
             
             for i, symbol in enumerate(symbols):
                 logger.info(f"Analyzing {symbol} across multiple timeframes...")
