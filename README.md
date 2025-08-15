@@ -61,9 +61,10 @@ docker-compose logs -f
 
 ### API限制处理
 - **速率限制**: 系统会自动处理TAAPI.io的速率限制
-- **批次限制**: 每次请求最多20个结果，系统会分批获取
+- **批次限制**: 每次请求最多20个结果，采用保守的获取策略
 - **容错机制**: 即使初始化失败，系统仍会正常启动
 - **渐进增强**: 随着时间推移，数据会自然积累，分析能力逐步提升
+- **快速启动**: 设置 `SKIP_INITIALIZATION=true` 可跳过初始化立即开始
 
 ### 数据充足性要求
 - **15分钟分析**: 至少需要60个5分钟数据点（5小时）
@@ -87,6 +88,7 @@ docker-compose logs -f
 - `MYSQL_PASSWORD`: MySQL 密码
 - `MYSQL_DB`: MySQL 数据库名
 - `MYSQL_ROOT_PASSWORD`: MySQL root 密码
+- `SKIP_INITIALIZATION`: 跳过历史数据初始化（可选，设为 `true` 立即启动）
 
 ## 数据架构与多时间框架分析
 

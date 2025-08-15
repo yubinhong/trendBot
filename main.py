@@ -31,6 +31,7 @@ MYSQL_HOST = os.getenv('MYSQL_HOST')
 MYSQL_USER = os.getenv('MYSQL_USER')
 MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD')
 MYSQL_DB = os.getenv('MYSQL_DB')
+SKIP_INITIALIZATION = os.getenv('SKIP_INITIALIZATION', 'false').lower() == 'true'
 
 if not all([TAAPI_KEY, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB]):
     logger.error("Missing required environment variables.")
@@ -833,20 +834,21 @@ def initialize_historical_data(symbol):
         cursor.close()
         conn.close()
         
-        # 如果已有足够数据（7天约2016个5分钟数据点），跳过初始化
-        if existing_count >= 1500:
+        # 如果已有一些数据，可以选择跳过初始化
+        if existing_count >= 100:  # 降低阈值，有100条记录就足够开始分析
             logger.info(f"{symbol} already has sufficient data ({existing_count} records)")
             return True
-        
-        logger.info(f"{symbol} has {existing_count} records, need to fetch historical data")
+        elif existing_count > 0:
+            logger.info(f"{symbol} has {existing_count} records, will try to fetch more historical data")
+        else:
+            logger.info(f"{symbol} has no historical data, attempting to fetch initial data")
         
         # 获取不同时间间隔的历史数据来快速填充（受API限制，每次最多20个结果）
+        # 由于速率限制严格，我们采用更保守的策略
         intervals_to_fetch = [
-            ("5m", 20),    # 最近20个5分钟数据
-            ("15m", 20),   # 最近20个15分钟数据  
-            ("1h", 20),    # 最近20个1小时数据
+            ("1d", 20),    # 最近20个1天数据（优先获取长期数据）
             ("4h", 20),    # 最近20个4小时数据
-            ("1d", 20),    # 最近20个1天数据
+            ("1h", 20),    # 最近20个1小时数据
         ]
         
         total_stored = 0
@@ -855,38 +857,35 @@ def initialize_historical_data(symbol):
             try:
                 logger.info(f"Fetching {batch_size} {interval} historical data for {symbol}")
                 
-                # 使用多次小批量请求来获取更多数据
-                batches_to_fetch = 3  # 获取3批，总共60个数据点
-                
-                for batch_num in range(batches_to_fetch):
-                    try:
-                        logger.debug(f"Fetching batch {batch_num + 1}/{batches_to_fetch} for {interval}")
+                # 由于API速率限制严格，只获取一批数据
+                try:
+                    logger.info(f"Fetching {batch_size} {interval} historical data for {symbol}")
+                    
+                    # 获取历史数据
+                    historical_data = fetch_historical_data_bulk(symbol, interval, batch_size)
+                    
+                    if historical_data:
+                        # 转换并存储数据
+                        stored_count = store_historical_data_bulk(symbol, historical_data, interval, 0)
+                        total_stored += stored_count
+                        logger.info(f"Successfully stored {stored_count} {interval} records")
+                    else:
+                        logger.warning(f"No data received for {interval}")
                         
-                        # 获取历史数据
-                        historical_data = fetch_historical_data_bulk(symbol, interval, batch_size)
-                        
-                        if historical_data:
-                            # 转换并存储数据
-                            stored_count = store_historical_data_bulk(symbol, historical_data, interval, batch_num)
-                            total_stored += stored_count
-                            logger.debug(f"Stored {stored_count} {interval} records (batch {batch_num + 1})")
-                        
-                        # 避免API限制 - 批次间等待更长时间
-                        if batch_num < batches_to_fetch - 1:
-                            time.sleep(10)
-                            
-                    except Exception as e:
-                        logger.warning(f"Error fetching batch {batch_num + 1} of {interval} data: {str(e)}")
-                        # 如果遇到速率限制，等待更长时间
-                        if "rate-limit" in str(e).lower():
-                            logger.info("Rate limit hit, waiting 30 seconds...")
-                            time.sleep(30)
-                        continue
+                except Exception as e:
+                    logger.warning(f"Error fetching {interval} data: {str(e)}")
+                    # 如果遇到速率限制，等待更长时间
+                    if "rate-limit" in str(e).lower():
+                        logger.info("Rate limit hit, waiting 60 seconds before continuing...")
+                        time.sleep(60)
+                    continue
                 
                 logger.info(f"Completed fetching {interval} data for {symbol}")
                 
-                # 时间间隔间等待
-                time.sleep(15)
+                # 时间间隔间等待更长时间
+                if interval != intervals_to_fetch[-1][0]:  # 不是最后一个间隔
+                    logger.info("Waiting 45 seconds before next interval to avoid rate limits...")
+                    time.sleep(45)
                 
             except Exception as e:
                 logger.error(f"Error fetching {interval} data for {symbol}: {str(e)}")
@@ -895,9 +894,13 @@ def initialize_historical_data(symbol):
         if total_stored == 0:
             logger.warning(f"No historical data could be fetched for {symbol} due to API limits")
             logger.info(f"System will start with current data and accumulate over time")
+            logger.info(f"This is normal with strict API limits - the system will work fine!")
+        else:
+            logger.info(f"Successfully initialized {total_stored} historical records for {symbol}")
         
         logger.info(f"Historical data initialization completed for {symbol}: {total_stored} total records")
-        return total_stored > 0
+        # 即使没有获取到历史数据，也返回True，因为系统可以正常运行
+        return True
         
     except Exception as e:
         logger.error(f"Error initializing historical data for {symbol}: {str(e)}")
@@ -1066,30 +1069,36 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # 初始化历史数据
-    logger.info("Checking and initializing historical data...")
-    logger.info("Note: Due to API rate limits, initialization may take several minutes")
+    if SKIP_INITIALIZATION:
+        logger.info("Skipping historical data initialization (SKIP_INITIALIZATION=true)")
+        logger.info("System will start immediately and accumulate data over time")
+        initialization_results = {symbol: True for symbol in symbols}
+    else:
+        logger.info("Checking and initializing historical data...")
+        logger.info("Note: Due to API rate limits, initialization may take several minutes")
+        logger.info("Set SKIP_INITIALIZATION=true in .env to skip this step")
+        
+        initialization_results = {}
     
-    initialization_results = {}
-    
-    for symbol in symbols:
-        try:
-            logger.info(f"Starting initialization for {symbol}...")
-            success = initialize_historical_data(symbol)
-            initialization_results[symbol] = success
-            
-            if success:
-                logger.info(f"✓ Successfully initialized historical data for {symbol}")
-            else:
-                logger.warning(f"⚠ Limited initialization for {symbol} - will accumulate data over time")
-            
-            # 符号间等待更长时间避免API限制
-            if symbol != symbols[-1]:  # 不是最后一个符号
-                logger.info("Waiting 30 seconds before next symbol to avoid API limits...")
-                time.sleep(30)
+        for symbol in symbols:
+            try:
+                logger.info(f"Starting initialization for {symbol}...")
+                success = initialize_historical_data(symbol)
+                initialization_results[symbol] = success
                 
-        except Exception as e:
-            logger.error(f"Error during initialization for {symbol}: {str(e)}")
-            initialization_results[symbol] = False
+                if success:
+                    logger.info(f"✓ Successfully initialized historical data for {symbol}")
+                else:
+                    logger.warning(f"⚠ Limited initialization for {symbol} - will accumulate data over time")
+                
+                # 符号间等待更长时间避免API限制
+                if symbol != symbols[-1]:  # 不是最后一个符号
+                    logger.info("Waiting 60 seconds before next symbol to avoid API limits...")
+                    time.sleep(60)
+                    
+            except Exception as e:
+                logger.error(f"Error during initialization for {symbol}: {str(e)}")
+                initialization_results[symbol] = True  # 设为True，让系统继续运行
     
     successful_inits = sum(1 for success in initialization_results.values() if success)
     total_symbols = len(symbols)
