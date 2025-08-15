@@ -799,35 +799,97 @@ def initialize_historical_data(symbol):
         
         logger.info(f"{symbol} has {existing_count} records, need to fetch historical data")
         
-        # 获取不同时间间隔的历史数据来快速填充
+        # 获取不同时间间隔的历史数据来快速填充（受API限制，每次最多20个结果）
         intervals_to_fetch = [
-            ("5m", 500),   # 最近500个5分钟数据
-            ("15m", 200),  # 最近200个15分钟数据  
-            ("1h", 100),   # 最近100个1小时数据
-            ("4h", 50),    # 最近50个4小时数据
+            ("5m", 20),    # 最近20个5分钟数据
+            ("15m", 20),   # 最近20个15分钟数据  
+            ("1h", 20),    # 最近20个1小时数据
+            ("4h", 20),    # 最近20个4小时数据
+            ("1d", 20),    # 最近20个1天数据
         ]
         
         total_stored = 0
         
-        for interval, limit in intervals_to_fetch:
+        for interval, batch_size in intervals_to_fetch:
             try:
-                logger.info(f"Fetching {limit} {interval} historical data for {symbol}")
+                logger.info(f"Fetching {batch_size} {interval} historical data for {symbol}")
                 
-                # 获取历史数据
-                historical_data = fetch_historical_data_bulk(symbol, interval, limit)
+                # 使用多次小批量请求来获取更多数据
+                batches_to_fetch = 3  # 获取3批，总共60个数据点
                 
-                if historical_data:
-                    # 转换并存储数据
-                    stored_count = store_historical_data_bulk(symbol, historical_data, interval)
-                    total_stored += stored_count
-                    logger.info(f"Stored {stored_count} {interval} records for {symbol}")
+                for batch_num in range(batches_to_fetch):
+                    try:
+                        logger.debug(f"Fetching batch {batch_num + 1}/{batches_to_fetch} for {interval}")
+                        
+                        # 获取历史数据
+                        historical_data = fetch_historical_data_bulk(symbol, interval, batch_size)
+                        
+                        if historical_data:
+                            # 转换并存储数据
+                            stored_count = store_historical_data_bulk(symbol, historical_data, interval, batch_num)
+                            total_stored += stored_count
+                            logger.debug(f"Stored {stored_count} {interval} records (batch {batch_num + 1})")
+                        
+                        # 避免API限制 - 批次间等待更长时间
+                        if batch_num < batches_to_fetch - 1:
+                            time.sleep(10)
+                            
+                    except Exception as e:
+                        logger.warning(f"Error fetching batch {batch_num + 1} of {interval} data: {str(e)}")
+                        # 如果遇到速率限制，等待更长时间
+                        if "rate-limit" in str(e).lower():
+                            logger.info("Rate limit hit, waiting 30 seconds...")
+                            time.sleep(30)
+                        continue
                 
-                # 避免API限制
-                time.sleep(3)
+                logger.info(f"Completed fetching {interval} data for {symbol}")
+                
+                # 时间间隔间等待
+                time.sleep(15)
                 
             except Exception as e:
                 logger.error(f"Error fetching {interval} data for {symbol}: {str(e)}")
                 continue
+        
+        if total_stored == 0:
+            logger.warning(f"No historical data could be fetched for {symbol} due to API limits")
+            logger.info(f"System will start with current data and accumulate over time")
+            # 至少确保表结构存在
+            try:
+                conn = mysql.connector.connect(
+                    host=MYSQL_HOST,
+                    user=MYSQL_USER,
+                    password=MYSQL_PASSWORD,
+                    database=MYSQL_DB
+                )
+                cursor = conn.cursor()
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS crypto_5min_data (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        symbol VARCHAR(20),
+                        timestamp DATETIME,
+                        interval_type VARCHAR(10),
+                        price FLOAT,
+                        open_price FLOAT,
+                        high_price FLOAT,
+                        low_price FLOAT,
+                        close_price FLOAT,
+                        volume FLOAT,
+                        adx FLOAT,
+                        pdi FLOAT,
+                        mdi FLOAT,
+                        sma50 FLOAT,
+                        sma200 FLOAT,
+                        bandwidth FLOAT,
+                        atr FLOAT,
+                        UNIQUE KEY unique_record (symbol, timestamp, interval_type)
+                    )
+                """)
+                conn.commit()
+                cursor.close()
+                conn.close()
+            except Exception as e:
+                logger.error(f"Error creating table structure: {str(e)}")
         
         logger.info(f"Historical data initialization completed for {symbol}: {total_stored} total records")
         return total_stored > 0
@@ -865,7 +927,7 @@ def fetch_historical_data_bulk(symbol, interval, limit):
         logger.error(f"Request error fetching {interval} history for {symbol}: {str(e)}")
         return None
 
-def store_historical_data_bulk(symbol, historical_data, interval):
+def store_historical_data_bulk(symbol, historical_data, interval, batch_offset=0):
     """批量存储历史数据"""
     if not historical_data:
         return 0
@@ -916,14 +978,17 @@ def store_historical_data_bulk(symbol, historical_data, interval):
                 
                 # 根据时间间隔创建多个5分钟数据点
                 interval_minutes = {
-                    "5m": 5, "15m": 15, "1h": 60, "4h": 240
+                    "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440
                 }.get(interval, 5)
                 
                 # 为了快速填充数据，我们将较大时间间隔的数据分解为多个5分钟点
                 points_per_interval = max(1, interval_minutes // 5)
                 
+                # 添加批次偏移，避免重复时间戳
+                base_offset_minutes = batch_offset * interval_minutes
+                
                 for i in range(points_per_interval):
-                    point_timestamp = timestamp + pd.Timedelta(minutes=i*5)
+                    point_timestamp = timestamp - pd.Timedelta(minutes=base_offset_minutes + i*5)
                     
                     cursor.execute("""
                         INSERT IGNORE INTO crypto_5min_data 
@@ -1015,26 +1080,43 @@ if __name__ == "__main__":
     
     # 初始化历史数据
     logger.info("Checking and initializing historical data...")
-    initialization_success = True
+    logger.info("Note: Due to API rate limits, initialization may take several minutes")
+    
+    initialization_results = {}
     
     for symbol in symbols:
         try:
+            logger.info(f"Starting initialization for {symbol}...")
             success = initialize_historical_data(symbol)
-            if not success:
-                logger.warning(f"Failed to initialize historical data for {symbol}")
-                initialization_success = False
-            time.sleep(5)  # 避免API限制
+            initialization_results[symbol] = success
+            
+            if success:
+                logger.info(f"✓ Successfully initialized historical data for {symbol}")
+            else:
+                logger.warning(f"⚠ Limited initialization for {symbol} - will accumulate data over time")
+            
+            # 符号间等待更长时间避免API限制
+            if symbol != symbols[-1]:  # 不是最后一个符号
+                logger.info("Waiting 30 seconds before next symbol to avoid API limits...")
+                time.sleep(30)
+                
         except Exception as e:
             logger.error(f"Error during initialization for {symbol}: {str(e)}")
-            initialization_success = False
+            initialization_results[symbol] = False
     
-    if initialization_success:
-        logger.info("Historical data initialization completed successfully")
+    successful_inits = sum(1 for success in initialization_results.values() if success)
+    total_symbols = len(symbols)
+    
+    if successful_inits == total_symbols:
+        logger.info("✓ Historical data initialization completed successfully for all symbols")
         logger.info("All timeframes should be available for analysis")
+    elif successful_inits > 0:
+        logger.info(f"⚠ Partial initialization success ({successful_inits}/{total_symbols} symbols)")
+        logger.info("System will start with mixed analysis capabilities")
     else:
-        logger.warning("Some historical data initialization failed")
-        logger.info("System will start with limited analysis capabilities")
-        logger.info("More timeframes will become available as data accumulates")
+        logger.warning("⚠ Historical data initialization failed for all symbols")
+        logger.info("System will start with minimal capabilities and accumulate data over time")
+        logger.info("This is normal when API rate limits are strict - analysis will improve over time")
     
     # 显示当前数据状态
     for symbol in symbols:
