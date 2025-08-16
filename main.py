@@ -1100,12 +1100,12 @@ def store_5min_data(symbol, indicators, interval="5m", data_source="api_direct")
         current_bw = indicators['bandwidths'][-1] if 'bandwidths' in indicators else None
         current_atr = indicators['atr_values'][-1] if 'atr_values' in indicators else None
         
-        # 提取增强模式的指标
+        # 提取增强模式的指标，确保类型转换
         rsi = indicators.get('rsi')
         stoch_k = indicators.get('stoch_k')
-        is_high_volatility = indicators.get('is_high_volatility', False)
+        is_high_volatility = bool(indicators.get('is_high_volatility', False))  # 转换为Python bool
         volatility_ratio = indicators.get('volatility_ratio')
-        enhanced_mode = indicators.get('enhanced_mode', False)
+        enhanced_mode = bool(indicators.get('enhanced_mode', False))  # 转换为Python bool
         
         cursor.execute("""
             INSERT INTO crypto_5min_data 
