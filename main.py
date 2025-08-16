@@ -9,6 +9,7 @@ from datetime import datetime
 import time
 import sys
 import logging
+import hashlib
 
 # Configure logging
 logging.basicConfig(
@@ -32,6 +33,12 @@ MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD')
 MYSQL_DB = os.getenv('MYSQL_DB')
 SKIP_INITIALIZATION = os.getenv('SKIP_INITIALIZATION', 'false').lower() == 'true'
 
+# Data granularity configuration
+DATA_GRANULARITY = os.getenv('DATA_GRANULARITY', '5m')  # '1m' or '5m'
+SMART_GRANULARITY = os.getenv('SMART_GRANULARITY', 'true').lower() == 'true'
+VOLATILITY_THRESHOLD = float(os.getenv('VOLATILITY_THRESHOLD', '2.0'))  # ATR multiplier for high volatility
+API_RATE_LIMIT_BUFFER = float(os.getenv('API_RATE_LIMIT_BUFFER', '0.8'))  # Use 80% of API limit
+
 if not all([TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB]):
     logger.error("Missing required environment variables.")
     raise ValueError("Missing required environment variables.")
@@ -40,6 +47,10 @@ logger.info("Starting crypto trend bot...")
 logger.info(f"Monitoring symbols: BTC/USDT, ETH/USDT")
 logger.info(f"MySQL Host: {MYSQL_HOST}")
 logger.info(f"Telegram Chat ID: {TELEGRAM_CHAT_ID}")
+logger.info(f"Data Granularity: {DATA_GRANULARITY}")
+logger.info(f"Smart Granularity: {SMART_GRANULARITY}")
+logger.info(f"Volatility Threshold: {VOLATILITY_THRESHOLD}")
+logger.info(f"API Rate Limit Buffer: {API_RATE_LIMIT_BUFFER}")
 
 # Test database connection
 try:
@@ -56,10 +67,107 @@ except Exception as e:
     logger.error("Please check your database configuration and ensure MySQL is running")
     sys.exit(1)
 
-def fetch_binance_klines(symbol, interval="5m", limit=1000, max_retries=3):
-    """从 Binance API 获取 K线数据"""
+# API调用频率控制
+api_call_count = 0
+api_call_reset_time = time.time()
+API_WEIGHT_LIMIT = int(1200 * API_RATE_LIMIT_BUFFER)  # 使用配置的缓冲比例
+
+# 智能缓存系统
+api_cache = {}
+CACHE_EXPIRY_SECONDS = 30  # 缓存30秒
+MAX_CACHE_SIZE = 100  # 最大缓存条目数
+
+def reset_api_counter_if_needed():
+    """如果需要，重置API调用计数器"""
+    global api_call_count, api_call_reset_time
+    current_time = time.time()
+    if current_time - api_call_reset_time >= 60:  # 每分钟重置
+        api_call_count = 0
+        api_call_reset_time = current_time
+        logger.debug("API call counter reset")
+
+def generate_cache_key(symbol, interval, limit, end_time=None):
+    """生成缓存键"""
+    key_data = f"{symbol}_{interval}_{limit}_{end_time}"
+    return hashlib.md5(key_data.encode()).hexdigest()
+
+def get_from_cache(cache_key):
+    """从缓存获取数据"""
+    if cache_key in api_cache:
+        cached_data, timestamp = api_cache[cache_key]
+        if time.time() - timestamp < CACHE_EXPIRY_SECONDS:
+            logger.debug(f"Cache hit for key: {cache_key[:8]}...")
+            return cached_data
+        else:
+            # 缓存过期，删除
+            del api_cache[cache_key]
+            logger.debug(f"Cache expired for key: {cache_key[:8]}...")
+    return None
+
+def set_cache(cache_key, data):
+    """设置缓存数据"""
+    global api_cache
+    
+    # 如果缓存已满，删除最旧的条目
+    if len(api_cache) >= MAX_CACHE_SIZE:
+        oldest_key = min(api_cache.keys(), key=lambda k: api_cache[k][1])
+        del api_cache[oldest_key]
+        logger.debug(f"Cache full, removed oldest entry: {oldest_key[:8]}...")
+    
+    api_cache[cache_key] = (data, time.time())
+    logger.debug(f"Cached data for key: {cache_key[:8]}...")
+
+def cleanup_expired_cache():
+    """清理过期的缓存条目"""
+    global api_cache
+    current_time = time.time()
+    expired_keys = []
+    
+    for key, (data, timestamp) in api_cache.items():
+        if current_time - timestamp >= CACHE_EXPIRY_SECONDS:
+            expired_keys.append(key)
+    
+    for key in expired_keys:
+        del api_cache[key]
+    
+    if expired_keys:
+        logger.debug(f"Cleaned up {len(expired_keys)} expired cache entries")
+
+def check_api_rate_limit(weight=1):
+    """检查API调用频率限制"""
+    global api_call_count
+    reset_api_counter_if_needed()
+    
+    if api_call_count + weight > API_WEIGHT_LIMIT:
+        wait_time = 60 - (time.time() - api_call_reset_time)
+        if wait_time > 0:
+            logger.warning(f"API rate limit approaching, waiting {wait_time:.1f} seconds")
+            time.sleep(wait_time)
+            reset_api_counter_if_needed()
+    
+    api_call_count += weight
+
+def fetch_binance_klines(symbol, interval=None, limit=1000, max_retries=3):
+    """从 Binance API 获取 K线数据，支持动态间隔选择和智能缓存"""
+    # 如果没有指定间隔，使用智能选择
+    if interval is None:
+        interval = get_optimal_interval(symbol)
+    
+    # 生成缓存键并尝试从缓存获取
+    cache_key = generate_cache_key(symbol, interval, limit)
+    cached_data = get_from_cache(cache_key)
+    if cached_data is not None:
+        return cached_data
+    
     # 转换符号格式：BTC/USDT -> BTCUSDT
     binance_symbol = symbol.replace('/', '')
+    
+    # 检查API调用频率
+    check_api_rate_limit(1)  # K线数据权重为1
+    
+    # 定期清理过期缓存
+    if len(api_cache) > 0 and time.time() % 60 < 1:
+        cleanup_expired_cache()
     
     url = "https://api.binance.com/api/v3/klines"
     params = {
@@ -76,6 +184,8 @@ def fetch_binance_klines(symbol, interval="5m", limit=1000, max_retries=3):
             if response.status_code == 200:
                 klines = response.json()
                 logger.debug(f"Successfully fetched {len(klines)} klines for {symbol}")
+                # 缓存成功的API响应
+                set_cache(cache_key, klines)
                 return klines
             elif response.status_code == 429:  # Rate limit
                 wait_time = (attempt + 1) * 5
@@ -96,10 +206,23 @@ def fetch_binance_klines(symbol, interval="5m", limit=1000, max_retries=3):
     
     raise Exception(f"Failed to fetch klines for {symbol} after {max_retries} attempts")
 
-def fetch_binance_klines_with_endtime(symbol, interval="5m", limit=1000, end_time=None, max_retries=3):
-    """从 Binance API 获取指定结束时间的 K线数据"""
+def fetch_binance_klines_with_endtime(symbol, interval=None, limit=1000, end_time=None, max_retries=3):
+    """从 Binance API 获取指定结束时间的 K线数据，支持动态间隔选择和智能缓存"""
+    # 如果没有指定间隔，使用智能选择
+    if interval is None:
+        interval = get_optimal_interval(symbol)
+    
+    # 生成缓存键并尝试从缓存获取
+    cache_key = generate_cache_key(symbol, interval, limit, end_time)
+    cached_data = get_from_cache(cache_key)
+    if cached_data is not None:
+        return cached_data
+    
     # 转换符号格式：BTC/USDT -> BTCUSDT
     binance_symbol = symbol.replace('/', '')
+    
+    # 检查API调用频率
+    check_api_rate_limit(1)  # K线数据权重为1
     
     url = "https://api.binance.com/api/v3/klines"
     params = {
@@ -119,6 +242,8 @@ def fetch_binance_klines_with_endtime(symbol, interval="5m", limit=1000, end_tim
             if response.status_code == 200:
                 klines = response.json()
                 logger.debug(f"Successfully fetched {len(klines)} klines for {symbol}")
+                # 缓存成功的API响应
+                set_cache(cache_key, klines)
                 return klines
             elif response.status_code == 429:  # Rate limit
                 wait_time = (attempt + 1) * 5
@@ -167,18 +292,135 @@ def convert_klines_to_ohlcv(klines):
     
     return ohlcv_data
 
-def fetch_current_5min_data(symbol):
-    """获取最新的5分钟数据并计算技术指标"""
+def detect_high_volatility(symbol, lookback_periods=20):
+    """检测当前市场波动率，判断是否需要更细粒度数据"""
     try:
-        # 获取最近的K线数据（包含足够的历史数据用于指标计算）
-        klines = fetch_binance_klines(symbol, "5m", limit=300)  # 获取300个5分钟数据
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB
+        )
+        cursor = conn.cursor()
         
+        # 获取最近的ATR数据
+        cursor.execute("""
+            SELECT atr, close_price
+            FROM crypto_5min_data 
+            WHERE symbol = %s AND atr > 0
+            ORDER BY timestamp DESC
+            LIMIT %s
+        """, (symbol, lookback_periods))
+        
+        data = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        if len(data) < 10:  # 需要足够的数据点
+            logger.debug(f"Insufficient ATR data for volatility detection: {len(data)} records")
+            return False
+        
+        # 计算ATR相对于价格的比率
+        atr_values = [row[0] for row in data]
+        prices = [row[1] for row in data]
+        
+        current_atr = atr_values[0]
+        current_price = prices[0]
+        avg_atr = np.mean(atr_values)
+        
+        # 计算ATR相对于价格的百分比
+        atr_percentage = (current_atr / current_price) * 100
+        avg_atr_percentage = (avg_atr / np.mean(prices)) * 100
+        
+        # 判断是否为高波动
+        volatility_ratio = current_atr / avg_atr if avg_atr > 0 else 1
+        is_high_volatility = volatility_ratio > VOLATILITY_THRESHOLD
+        
+        logger.debug(f"{symbol} volatility analysis: ATR={current_atr:.4f}, Ratio={volatility_ratio:.2f}, High={is_high_volatility}")
+        
+        return is_high_volatility
+        
+    except Exception as e:
+        logger.error(f"Error detecting volatility for {symbol}: {str(e)}")
+        return False
+
+def get_optimal_interval(symbol):
+    """根据配置和市场条件确定最优的数据间隔"""
+    # 如果禁用智能粒度，直接返回配置的粒度
+    if not SMART_GRANULARITY:
+        return DATA_GRANULARITY
+    
+    # 如果配置为1分钟，直接返回
+    if DATA_GRANULARITY == '1m':
+        return '1m'
+    
+    # 检测高波动率
+    if detect_high_volatility(symbol):
+        logger.info(f"{symbol} high volatility detected, using 1m data")
+        return '1m'
+    else:
+        logger.debug(f"{symbol} normal volatility, using {DATA_GRANULARITY} data")
+        return DATA_GRANULARITY
+
+def aggregate_1min_to_5min(df_1min):
+    """将1分钟数据聚合为5分钟数据"""
+    try:
+        if df_1min.empty:
+            return pd.DataFrame()
+        
+        # 确保时间戳是datetime类型
+        df_1min['timestamp'] = pd.to_datetime(df_1min['timestamp'])
+        df_1min.set_index('timestamp', inplace=True)
+        
+        # 按5分钟重采样
+        df_5min = df_1min.resample('5T').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+        
+        # 重置索引
+        df_5min.reset_index(inplace=True)
+        
+        logger.debug(f"Aggregated {len(df_1min)} 1min records to {len(df_5min)} 5min records")
+        return df_5min
+        
+    except Exception as e:
+        logger.error(f"Error aggregating 1min to 5min data: {str(e)}")
+        return pd.DataFrame()
+
+def fetch_current_data(symbol):
+    """获取最新数据并计算技术指标，支持动态粒度选择"""
+    try:
+        # 获取最优间隔
+        optimal_interval = get_optimal_interval(symbol)
+        
+        # 根据间隔调整获取的数据量
+        if optimal_interval == '1m':
+            limit = 1500  # 1分钟数据需要更多点数来覆盖相同时间范围
+        else:
+            limit = 300   # 5分钟数据
+        
+        # 获取最新的K线数据
+        klines = fetch_binance_klines(symbol, optimal_interval, limit)
         if not klines:
             logger.error(f"No klines data received for {symbol}")
             return None
         
         # 转换为OHLCV格式
         ohlcv_data = convert_klines_to_ohlcv(klines)
+        
+        # 如果获取的是1分钟数据，需要聚合成5分钟数据用于存储
+        if optimal_interval == '1m':
+            # 聚合1分钟数据为5分钟数据
+            ohlcv_5min = aggregate_1min_to_5min(ohlcv_data.copy())
+            if ohlcv_5min.empty:
+                logger.error(f"Failed to aggregate 1m to 5m data for {symbol}")
+                return None
+            # 使用聚合后的5分钟数据进行存储和分析
+            ohlcv_data = ohlcv_5min
         
         if len(ohlcv_data) < 200:
             logger.warning(f"Insufficient klines data for {symbol}: {len(ohlcv_data)} records")
@@ -450,7 +692,7 @@ def aggregate_5min_to_timeframe(raw_data, timeframe_minutes):
     return aggregated
 
 def calculate_technical_indicators(ohlcv_data):
-    """使用pandas-ta基于OHLCV数据计算专业技术指标"""
+    """使用pandas-ta基于OHLCV数据计算专业技术指标，支持高波动期增强处理"""
     # 动态调整最小数据要求，确保能计算基本指标
     min_periods = max(50, len(ohlcv_data) // 4)  # 至少50个周期，或数据的1/4
     
@@ -504,12 +746,50 @@ def calculate_technical_indicators(ohlcv_data):
         # 计算ATR (Average True Range)
         df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
         
+        # 高波动期增强处理：检测当前波动率水平
+        recent_atr = df['atr'].tail(20).dropna()
+        if len(recent_atr) >= 10:
+            current_atr_value = recent_atr.iloc[-1]
+            avg_atr = recent_atr.mean()
+            volatility_ratio = current_atr_value / avg_atr if avg_atr > 0 else 1
+            is_high_volatility = volatility_ratio > VOLATILITY_THRESHOLD
+            
+            # 在高波动期动态调整指标参数
+            if is_high_volatility:
+                logger.debug(f"High volatility detected (ratio: {volatility_ratio:.2f}), using enhanced indicators")
+                
+                # 使用更短周期的ADX以更快响应变化
+                adx_data_short = ta.adx(df['high'], df['low'], df['close'], length=10)
+                df['adx_enhanced'] = adx_data_short['ADX_10']
+                df['plus_di_enhanced'] = adx_data_short['DMP_10']
+                df['minus_di_enhanced'] = adx_data_short['DMN_10']
+                
+                # 计算额外的波动率指标
+                df['rsi'] = ta.rsi(df['close'], length=14)  # RSI用于超买超卖判断
+                df['stoch_k'] = ta.stoch(df['high'], df['low'], df['close'])['STOCHk_14_3_3']  # 随机指标
+                
+                # 使用增强的指标值
+                use_enhanced = True
+            else:
+                use_enhanced = False
+        else:
+            use_enhanced = False
+            is_high_volatility = False
+        
         # 获取最新值（处理NaN）
         current_sma50 = df['sma50'].iloc[-1] if not pd.isna(df['sma50'].iloc[-1]) else df['close'].iloc[-1]
         current_sma200 = df['sma200'].iloc[-1] if not pd.isna(df['sma200'].iloc[-1]) else df['close'].iloc[-1]
-        current_adx = df['adx'].iloc[-1] if not pd.isna(df['adx'].iloc[-1]) else 0
-        current_plus_di = df['plus_di'].iloc[-1] if not pd.isna(df['plus_di'].iloc[-1]) else 0
-        current_minus_di = df['minus_di'].iloc[-1] if not pd.isna(df['minus_di'].iloc[-1]) else 0
+        
+        # 根据波动率选择ADX指标
+        if use_enhanced and 'adx_enhanced' in df.columns:
+            current_adx = df['adx_enhanced'].iloc[-1] if not pd.isna(df['adx_enhanced'].iloc[-1]) else 0
+            current_plus_di = df['plus_di_enhanced'].iloc[-1] if not pd.isna(df['plus_di_enhanced'].iloc[-1]) else 0
+            current_minus_di = df['minus_di_enhanced'].iloc[-1] if not pd.isna(df['minus_di_enhanced'].iloc[-1]) else 0
+        else:
+            current_adx = df['adx'].iloc[-1] if not pd.isna(df['adx'].iloc[-1]) else 0
+            current_plus_di = df['plus_di'].iloc[-1] if not pd.isna(df['plus_di'].iloc[-1]) else 0
+            current_minus_di = df['minus_di'].iloc[-1] if not pd.isna(df['minus_di'].iloc[-1]) else 0
+        
         current_atr = df['atr'].iloc[-1] if not pd.isna(df['atr'].iloc[-1]) else 0
         
         # 获取最近20个有效的布林带宽度值
@@ -522,10 +802,20 @@ def calculate_technical_indicators(ohlcv_data):
         if not valid_atr_values:
             valid_atr_values = [current_atr]
         
+        # 获取额外的高波动期指标
+        current_rsi = None
+        current_stoch = None
+        if use_enhanced:
+            current_rsi = df['rsi'].iloc[-1] if 'rsi' in df.columns and not pd.isna(df['rsi'].iloc[-1]) else None
+            current_stoch = df['stoch_k'].iloc[-1] if 'stoch_k' in df.columns and not pd.isna(df['stoch_k'].iloc[-1]) else None
+        
         logger.debug(f"Calculated indicators - SMA50: {current_sma50:.2f}, SMA200: {current_sma200:.2f}, "
                     f"ADX: {current_adx:.2f}, +DI: {current_plus_di:.2f}, -DI: {current_minus_di:.2f}")
         
-        return {
+        if is_high_volatility:
+            logger.debug(f"High volatility indicators - RSI: {current_rsi}, Stoch: {current_stoch}")
+        
+        result = {
             'price': df['close'].iloc[-1],
             'open': df['open'].iloc[-1],
             'high': df['high'].iloc[-1],
@@ -538,8 +828,20 @@ def calculate_technical_indicators(ohlcv_data):
             'pdi': current_plus_di,
             'mdi': current_minus_di,
             'bandwidths': valid_bandwidths,
-            'atr_values': valid_atr_values
+            'atr_values': valid_atr_values,
+            'is_high_volatility': is_high_volatility,
+            'volatility_ratio': volatility_ratio if 'volatility_ratio' in locals() else 1.0
         }
+        
+        # 添加高波动期的额外指标
+        if use_enhanced:
+            result.update({
+                'rsi': current_rsi,
+                'stoch_k': current_stoch,
+                'enhanced_mode': True
+            })
+        
+        return result
         
     except Exception as e:
         logger.error(f"Error calculating technical indicators with pandas-ta: {str(e)}")
@@ -737,10 +1039,10 @@ def generate_insight(symbol, trend, indicators=None, timeframe="5m"):
         
         return f"[{tf_name}]趋势信号混合，建议观察关键技术位突破情况。{validity_info}。"
 
-def store_5min_data(symbol, indicators, interval="5m"):
-    """存储5分钟原始数据"""
+def store_1min_data(symbol, ohlcv_data, interval="1m"):
+    """存储1分钟原始数据"""
     try:
-        logger.debug(f"Storing 5min data for {symbol}")
+        logger.debug(f"Storing 1min data for {symbol}")
         conn = mysql.connector.connect(
             host=MYSQL_HOST,
             user=MYSQL_USER,
@@ -749,26 +1051,81 @@ def store_5min_data(symbol, indicators, interval="5m"):
         )
         cursor = conn.cursor()
         
-        # Insert 5min data
+        # 批量插入1分钟数据
+        stored_count = 0
+        for record in ohlcv_data:
+            try:
+                cursor.execute("""
+                    INSERT INTO crypto_1min_data 
+                    (symbol, timestamp, interval_type, price, open_price, high_price, low_price, close_price, volume)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                    price=VALUES(price), open_price=VALUES(open_price), high_price=VALUES(high_price),
+                    low_price=VALUES(low_price), close_price=VALUES(close_price), volume=VALUES(volume)
+                """, (symbol, record['timestamp'], interval,
+                      record['close'], record['open'], record['high'],
+                      record['low'], record['close'], record['volume']))
+                
+                if cursor.rowcount > 0:
+                    stored_count += 1
+                    
+            except Exception as e:
+                logger.warning(f"Error storing 1min record: {str(e)}")
+                continue
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logger.debug(f"Successfully stored {stored_count} 1min records for {symbol}")
+        return stored_count
+        
+    except Exception as e:
+        logger.error(f"MySQL error storing 1min data for {symbol}: {str(e)}")
+        raise
+
+def store_5min_data(symbol, indicators, interval="5m", data_source="api_direct"):
+    """存储5分钟数据和技术指标，支持增强字段"""
+    try:
+        logger.debug(f"Storing 5min data for {symbol} (source: {data_source})")
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB
+        )
+        cursor = conn.cursor()
+        
+        # Insert 5min data with enhanced fields
         now = datetime.now()
         current_bw = indicators['bandwidths'][-1] if 'bandwidths' in indicators else None
         current_atr = indicators['atr_values'][-1] if 'atr_values' in indicators else None
         
+        # 提取增强模式的指标
+        rsi = indicators.get('rsi')
+        stoch_k = indicators.get('stoch_k')
+        is_high_volatility = indicators.get('is_high_volatility', False)
+        volatility_ratio = indicators.get('volatility_ratio')
+        enhanced_mode = indicators.get('enhanced_mode', False)
+        
         cursor.execute("""
             INSERT INTO crypto_5min_data 
             (symbol, timestamp, interval_type, price, open_price, high_price, low_price, close_price, volume, 
-             adx, pdi, mdi, sma50, sma200, bandwidth, atr)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             adx, pdi, mdi, sma50, sma200, bandwidth, atr, rsi, stoch_k, is_high_volatility, 
+             volatility_ratio, enhanced_mode, data_source)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
             price=VALUES(price), open_price=VALUES(open_price), high_price=VALUES(high_price),
             low_price=VALUES(low_price), close_price=VALUES(close_price), volume=VALUES(volume),
             adx=VALUES(adx), pdi=VALUES(pdi), mdi=VALUES(mdi), sma50=VALUES(sma50), sma200=VALUES(sma200),
-            bandwidth=VALUES(bandwidth), atr=VALUES(atr)
+            bandwidth=VALUES(bandwidth), atr=VALUES(atr), rsi=VALUES(rsi), stoch_k=VALUES(stoch_k),
+            is_high_volatility=VALUES(is_high_volatility), volatility_ratio=VALUES(volatility_ratio),
+            enhanced_mode=VALUES(enhanced_mode), data_source=VALUES(data_source)
         """, (symbol, now, interval, 
               indicators.get('price', 0), indicators.get('open', 0), indicators.get('high', 0),
               indicators.get('low', 0), indicators.get('close', 0), indicators.get('volume', 0),
               indicators['adx'], indicators['pdi'], indicators['mdi'], 
-              indicators['sma50'], indicators['sma200'], current_bw, current_atr))
+              indicators['sma50'], indicators['sma200'], current_bw, current_atr,
+              rsi, stoch_k, is_high_volatility, volatility_ratio, enhanced_mode, data_source))
         
         conn.commit()
         cursor.close()
@@ -847,7 +1204,7 @@ def check_expired_trends():
         logger.error(f"Error checking expired trends: {str(e)}")
 
 def ensure_database_tables():
-    """确保数据库表存在"""
+    """确保数据库表存在，支持多粒度数据存储"""
     try:
         conn = mysql.connector.connect(
             host=MYSQL_HOST,
@@ -857,13 +1214,33 @@ def ensure_database_tables():
         )
         cursor = conn.cursor()
         
-        # 创建5分钟数据表
+        # 创建1分钟数据表（原始高精度数据）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crypto_1min_data (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                symbol VARCHAR(20),
+                timestamp DATETIME,
+                interval_type VARCHAR(10) DEFAULT '1m',
+                price FLOAT,
+                open_price FLOAT,
+                high_price FLOAT,
+                low_price FLOAT,
+                close_price FLOAT,
+                volume FLOAT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_record (symbol, timestamp, interval_type),
+                INDEX idx_symbol_timestamp (symbol, timestamp),
+                INDEX idx_timestamp (timestamp)
+            )
+        """)
+        
+        # 创建5分钟数据表（聚合数据和技术指标）
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS crypto_5min_data (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 symbol VARCHAR(20),
                 timestamp DATETIME,
-                interval_type VARCHAR(10),
+                interval_type VARCHAR(10) DEFAULT '5m',
                 price FLOAT,
                 open_price FLOAT,
                 high_price FLOAT,
@@ -877,7 +1254,17 @@ def ensure_database_tables():
                 sma200 FLOAT,
                 bandwidth FLOAT,
                 atr FLOAT,
-                UNIQUE KEY unique_record (symbol, timestamp, interval_type)
+                rsi FLOAT,
+                stoch_k FLOAT,
+                is_high_volatility BOOLEAN DEFAULT FALSE,
+                volatility_ratio FLOAT,
+                enhanced_mode BOOLEAN DEFAULT FALSE,
+                data_source ENUM('api_direct', 'aggregated_1m') DEFAULT 'api_direct',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_record (symbol, timestamp, interval_type),
+                INDEX idx_symbol_timestamp (symbol, timestamp),
+                INDEX idx_timestamp (timestamp),
+                INDEX idx_volatility (is_high_volatility)
             )
         """)
         
@@ -893,7 +1280,11 @@ def ensure_database_tables():
                 adx_strength FLOAT,
                 expected_validity_hours INT,
                 is_expired BOOLEAN DEFAULT FALSE,
-                UNIQUE KEY unique_trend (symbol, timeframe, timestamp)
+                data_quality ENUM('high', 'medium', 'low') DEFAULT 'medium',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY unique_trend (symbol, timeframe, timestamp),
+                INDEX idx_symbol_timeframe (symbol, timeframe),
+                INDEX idx_timestamp (timestamp)
             )
         """)
         
@@ -1065,15 +1456,41 @@ def store_historical_klines_bulk(symbol, ohlcv_data, interval):
         
         stored_count = 0
         
-        # 如果是5分钟数据，直接存储
-        if interval == "5m":
+        # 如果是1分钟数据，存储到1分钟表
+        if interval == "1m":
+            for record in ohlcv_data:
+                try:
+                    cursor.execute("""
+                        INSERT IGNORE INTO crypto_1min_data 
+                        (symbol, timestamp, interval_type, price, open_price, high_price, low_price, close_price, volume)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        symbol, record['timestamp'], "1m",
+                        record['close'],  # price
+                        record['open'],
+                        record['high'],
+                        record['low'],
+                        record['close'],
+                        record['volume']
+                    ))
+                    
+                    if cursor.rowcount > 0:
+                        stored_count += 1
+                        
+                except Exception as e:
+                    logger.warning(f"Error storing 1min kline record: {str(e)}")
+                    continue
+        
+        # 如果是5分钟数据，直接存储到5分钟表
+        elif interval == "5m":
             for record in ohlcv_data:
                 try:
                     cursor.execute("""
                         INSERT IGNORE INTO crypto_5min_data 
                         (symbol, timestamp, interval_type, price, open_price, high_price, low_price, close_price, volume, 
-                         adx, pdi, mdi, sma50, sma200, bandwidth, atr)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         adx, pdi, mdi, sma50, sma200, bandwidth, atr, rsi, stoch_k, is_high_volatility, 
+                         volatility_ratio, enhanced_mode, data_source)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         symbol, record['timestamp'], "5m",
                         record['close'],  # price
@@ -1082,7 +1499,7 @@ def store_historical_klines_bulk(symbol, ohlcv_data, interval):
                         record['low'],
                         record['close'],
                         record['volume'],
-                        0, 0, 0, 0, 0, 0, 0  # 技术指标稍后计算
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, False, 0, False, 'api_direct'  # 技术指标稍后计算
                     ))
                     
                     if cursor.rowcount > 0:
@@ -1139,6 +1556,162 @@ def store_historical_klines_bulk(symbol, ohlcv_data, interval):
         logger.error(f"Error storing historical klines bulk: {str(e)}")
         return 0
 
+def monitor_data_quality(symbol):
+    """监控数据质量和精度对比"""
+    try:
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB
+        )
+        cursor = conn.cursor()
+        
+        quality_report = {
+            'symbol': symbol,
+            'timestamp': datetime.now(),
+            'data_completeness': {},
+            'precision_comparison': {},
+            'anomaly_detection': {},
+            'overall_quality': 'unknown'
+        }
+        
+        # 1. 检查数据完整性
+        # 检查1分钟数据完整性（最近1小时）
+        cursor.execute("""
+            SELECT COUNT(*) as actual_count,
+                   60 as expected_count,
+                   (COUNT(*) / 60.0 * 100) as completeness_pct
+            FROM crypto_1min_data 
+            WHERE symbol = %s AND timestamp >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
+        """, (symbol,))
+        
+        result = cursor.fetchone()
+        if result:
+            quality_report['data_completeness']['1min'] = {
+                'actual_count': result[0],
+                'expected_count': result[1],
+                'completeness_pct': round(result[2], 2)
+            }
+        
+        # 检查5分钟数据完整性（最近1小时）
+        cursor.execute("""
+            SELECT COUNT(*) as actual_count,
+                   12 as expected_count,
+                   (COUNT(*) / 12.0 * 100) as completeness_pct
+            FROM crypto_5min_data 
+            WHERE symbol = %s AND timestamp >= DATE_SUB(NOW(), INTERVAL 1 HOUR)
+        """, (symbol,))
+        
+        result = cursor.fetchone()
+        if result:
+            quality_report['data_completeness']['5min'] = {
+                'actual_count': result[0],
+                'expected_count': result[1],
+                'completeness_pct': round(result[2], 2)
+            }
+        
+        # 2. 精度对比：比较聚合数据与直接API数据的差异
+        cursor.execute("""
+            SELECT 
+                AVG(CASE WHEN data_source = 'api_direct' THEN close_price END) as api_direct_avg,
+                AVG(CASE WHEN data_source = 'aggregated_1m' THEN close_price END) as aggregated_avg,
+                COUNT(CASE WHEN data_source = 'api_direct' THEN 1 END) as direct_count,
+                COUNT(CASE WHEN data_source = 'aggregated_1m' THEN 1 END) as aggregated_count
+            FROM crypto_5min_data 
+            WHERE symbol = %s AND timestamp >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+        """, (symbol,))
+        
+        result = cursor.fetchone()
+        if result and result[0] and result[1]:
+            price_diff_pct = abs((result[0] - result[1]) / result[0] * 100)
+            quality_report['precision_comparison'] = {
+                'api_direct_avg_price': round(result[0], 4),
+                'aggregated_avg_price': round(result[1], 4),
+                'price_diff_pct': round(price_diff_pct, 4),
+                'direct_count': result[2],
+                'aggregated_count': result[3]
+            }
+        
+        # 3. 异常检测：检查价格跳跃和数据异常
+        cursor.execute("""
+            SELECT 
+                COUNT(CASE WHEN ABS((close_price - LAG(close_price) OVER (ORDER BY timestamp)) / LAG(close_price) OVER (ORDER BY timestamp)) > 0.05 THEN 1 END) as large_jumps,
+                COUNT(*) as total_records,
+                AVG(volatility_ratio) as avg_volatility_ratio,
+                COUNT(CASE WHEN is_high_volatility = 1 THEN 1 END) as high_volatility_periods
+            FROM crypto_5min_data 
+            WHERE symbol = %s AND timestamp >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+        """, (symbol,))
+        
+        result = cursor.fetchone()
+        if result:
+            jump_rate = (result[0] / max(result[1], 1)) * 100 if result[1] > 0 else 0
+            quality_report['anomaly_detection'] = {
+                'large_price_jumps': result[0],
+                'total_records': result[1],
+                'jump_rate_pct': round(jump_rate, 2),
+                'avg_volatility_ratio': round(result[2] or 0, 2),
+                'high_volatility_periods': result[3]
+            }
+        
+        # 4. 计算整体质量评分
+        quality_score = 0
+        max_score = 0
+        
+        # 数据完整性评分 (40%)
+        if '1min' in quality_report['data_completeness']:
+            completeness_1m = quality_report['data_completeness']['1min']['completeness_pct']
+            quality_score += (completeness_1m / 100) * 20
+        max_score += 20
+        
+        if '5min' in quality_report['data_completeness']:
+            completeness_5m = quality_report['data_completeness']['5min']['completeness_pct']
+            quality_score += (completeness_5m / 100) * 20
+        max_score += 20
+        
+        # 精度评分 (30%)
+        if quality_report['precision_comparison']:
+            price_diff = quality_report['precision_comparison']['price_diff_pct']
+            precision_score = max(0, (1 - price_diff / 5) * 30)  # 5%差异为0分
+            quality_score += precision_score
+        max_score += 30
+        
+        # 异常检测评分 (30%)
+        if quality_report['anomaly_detection']:
+            jump_rate = quality_report['anomaly_detection']['jump_rate_pct']
+            anomaly_score = max(0, (1 - jump_rate / 10) * 30)  # 10%跳跃率为0分
+            quality_score += anomaly_score
+        max_score += 30
+        
+        # 计算最终质量等级
+        if max_score > 0:
+            final_score = (quality_score / max_score) * 100
+            if final_score >= 90:
+                quality_report['overall_quality'] = 'high'
+            elif final_score >= 70:
+                quality_report['overall_quality'] = 'medium'
+            else:
+                quality_report['overall_quality'] = 'low'
+            
+            quality_report['quality_score'] = round(final_score, 2)
+        
+        cursor.close()
+        conn.close()
+        
+        # 记录质量报告
+        logger.info(f"Data quality report for {symbol}: {quality_report['overall_quality']} ({quality_report.get('quality_score', 0):.1f}%)")
+        
+        # 如果质量较低，记录警告
+        if quality_report['overall_quality'] == 'low':
+            logger.warning(f"Low data quality detected for {symbol}. Consider investigating data sources.")
+        
+        return quality_report
+        
+    except Exception as e:
+        logger.error(f"Error monitoring data quality for {symbol}: {str(e)}")
+        return None
+
 def cleanup_old_data():
     """清理旧数据，保留足够支持1天趋势分析的数据"""
     try:
@@ -1149,6 +1722,13 @@ def cleanup_old_data():
             database=MYSQL_DB
         )
         cursor = conn.cursor()
+        
+        # 清理1分钟数据（保留7天，用于高波动期分析）
+        cursor.execute("""
+            DELETE FROM crypto_1min_data 
+            WHERE timestamp < DATE_SUB(NOW(), INTERVAL 7 DAY)
+        """)
+        deleted_1min = cursor.rowcount
         
         # 清理5分钟数据（保留250天，确保1天趋势SMA200有足够数据）
         cursor.execute("""
@@ -1168,8 +1748,8 @@ def cleanup_old_data():
         cursor.close()
         conn.close()
         
-        if deleted_5min > 0 or deleted_trends > 0:
-            logger.info(f"Cleaned up old data: {deleted_5min} 5min records (>250 days), {deleted_trends} trend records (>90 days)")
+        if deleted_1min > 0 or deleted_5min > 0 or deleted_trends > 0:
+            logger.info(f"Cleaned up old data: {deleted_1min} 1min records (>7 days), {deleted_5min} 5min records (>250 days), {deleted_trends} trend records (>90 days)")
         
     except Exception as e:
         logger.error(f"Error cleaning up old data: {str(e)}")
@@ -1278,6 +1858,35 @@ if __name__ == "__main__":
                 logger.info("Performing daily data cleanup...")
                 cleanup_old_data()
                 check_expired_trends()
+                
+                # 执行数据质量监控
+                logger.info("Performing daily data quality monitoring...")
+                for symbol in symbols:
+                    quality_report = monitor_data_quality(symbol)
+                    if quality_report:
+                        logger.info(f"Data quality report for {symbol}: {quality_report['overall_quality']} ({quality_report.get('quality_score', 0):.1f}%)")
+                        
+                        # 如果数据质量低，发送警告通知
+                        if quality_report['overall_quality'] == 'low':
+                            warning_message = f"⚠️ 数据质量警告\n\n"
+                            warning_message += f"币种: {symbol}\n"
+                            warning_message += f"质量等级: {quality_report['overall_quality']}\n"
+                            warning_message += f"质量评分: {quality_report.get('quality_score', 0):.1f}%\n\n"
+                            
+                            if 'data_completeness' in quality_report:
+                                warning_message += "数据完整性:\n"
+                                for timeframe, data in quality_report['data_completeness'].items():
+                                    warning_message += f"  {timeframe}: {data['completeness_pct']:.1f}%\n"
+                            
+                            if 'anomaly_detection' in quality_report:
+                                anomaly = quality_report['anomaly_detection']
+                                warning_message += f"\n异常检测:\n"
+                                warning_message += f"  价格跳跃率: {anomaly.get('jump_rate_pct', 0):.1f}%\n"
+                                warning_message += f"  高波动期: {anomaly.get('high_volatility_periods', 0)}次\n"
+                            
+                            warning_message += "\n建议检查数据源和网络连接。"
+                            send_to_telegram(warning_message)
+                            logger.warning(f"Low data quality alert sent for {symbol}")
             
             for i, symbol in enumerate(symbols):
                 logger.info(f"Analyzing {symbol} across multiple timeframes...")
@@ -1289,7 +1898,7 @@ if __name__ == "__main__":
                 
                 # 获取最新的5分钟数据并存储
                 try:
-                    indicators_5m = fetch_current_5min_data(symbol)
+                    indicators_5m = fetch_current_data(symbol)
                     if indicators_5m:
                         store_5min_data(symbol, indicators_5m, "5m")
                         logger.info(f"Stored latest 5min data for {symbol}")
