@@ -543,15 +543,14 @@ def check_data_sufficiency(symbol):
         cursor.close()
         conn.close()
         
-        # 评估数据充足性
+        # 评估数据充足性（基于实际获取的数据量调整阈值）
         sufficiency = {
             "total_records": total_count,
             "recent_records": recent_count,
-            "can_analyze_15m": recent_count >= 60,    # 需要至少5小时数据
-            "can_analyze_1h": recent_count >= 240,    # 需要至少20小时数据
-            "can_analyze_4h": total_count >= 1000,    # 需要至少3-4天数据
-            "can_analyze_1d": total_count >= 5000,    # 需要至少17天数据（基础分析）
-
+            "can_analyze_15m": total_count >= 60,     # 需要至少5小时数据
+            "can_analyze_1h": total_count >= 240,     # 需要至少20小时数据  
+            "can_analyze_4h": total_count >= 300,     # 需要至少1天数据（实用阈值）
+            "can_analyze_1d": total_count >= 1000,    # 需要至少3.5天数据（基础分析）
         }
         
         return sufficiency
