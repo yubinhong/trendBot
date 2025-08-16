@@ -339,12 +339,12 @@ def calculate_indicators_from_5min_data(symbol, timeframe_minutes):
         cursor.close()
         conn.close()
         
-        # 根据时间框架调整最小数据要求（更实用的阈值）
+        # 根据时间框架调整最小数据要求
         min_periods_needed = {
             15: 20,    # 15分钟需要20个周期 (约5小时)
             60: 25,    # 1小时需要25个周期 (约1天)  
-            240: 15,   # 4小时需要15个周期 (约2.5天)
-            1440: 10   # 1天需要10个周期 (约10天)
+            240: 15,   # 4小时需要15个周期 (约2.5天) - 基础分析
+            1440: 200  # 1天需要200个周期 (约200天) - 保持高准确度
         }.get(timeframe_minutes, 20)
         
         if len(raw_data) < periods_per_timeframe * min_periods_needed:
@@ -356,12 +356,12 @@ def calculate_indicators_from_5min_data(symbol, timeframe_minutes):
         # 将5分钟数据聚合为目标时间框架
         aggregated_data = aggregate_5min_to_timeframe(raw_data, timeframe_minutes)
         
-        # 根据时间框架调整聚合数据的最小要求（实用阈值）
+        # 根据时间框架调整聚合数据的最小要求
         min_aggregated_periods = {
             15: 20,    # 15分钟需要20个聚合周期
             60: 25,    # 1小时需要25个聚合周期
-            240: 15,   # 4小时需要15个聚合周期
-            1440: 10   # 1天需要10个聚合周期
+            240: 15,   # 4小时需要15个聚合周期（基础分析）
+            1440: 200  # 1天需要200个聚合周期（保持高准确度）
         }.get(timeframe_minutes, 20)
         
         if len(aggregated_data) < min_aggregated_periods:
@@ -447,8 +447,19 @@ def aggregate_5min_to_timeframe(raw_data, timeframe_minutes):
 
 def calculate_technical_indicators(ohlcv_data):
     """使用pandas-ta基于OHLCV数据计算专业技术指标"""
-    if len(ohlcv_data) < 200:
-        logger.warning(f"Insufficient data for technical indicators: {len(ohlcv_data)} periods")
+    # 动态调整最小数据要求，确保能计算基本指标
+    min_periods = max(50, len(ohlcv_data) // 4)  # 至少50个周期，或数据的1/4
+    
+    # 根据数据量动态调整要求
+    if len(ohlcv_data) >= 200:
+        # 数据充足，可以进行完整分析
+        min_required = 200
+    elif len(ohlcv_data) >= 50:
+        # 数据适中，可以进行基础分析（主要用于4小时）
+        min_required = 50
+    else:
+        # 数据不足，无法分析
+        logger.warning(f"Insufficient data for technical indicators: {len(ohlcv_data)} periods (need at least 50)")
         return None
     
     try:
@@ -559,14 +570,14 @@ def check_data_sufficiency(symbol):
         cursor.close()
         conn.close()
         
-        # 评估数据充足性（基于实际获取的数据量调整阈值）
+        # 评估数据充足性（4小时基础分析，1天高准确度分析）
         sufficiency = {
             "total_records": total_count,
             "recent_records": recent_count,
             "can_analyze_15m": total_count >= 60,     # 需要至少5小时数据
             "can_analyze_1h": total_count >= 240,     # 需要至少20小时数据  
-            "can_analyze_4h": total_count >= 300,     # 需要至少1天数据（实用阈值）
-            "can_analyze_1d": total_count >= 1000,    # 需要至少3.5天数据（基础分析）
+            "can_analyze_4h": total_count >= 720,     # 需要至少2.5天数据（基础分析）
+            "can_analyze_1d": total_count >= 57600,   # 需要至少200天数据（完整分析）
         }
         
         return sufficiency
