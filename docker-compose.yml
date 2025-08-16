@@ -19,28 +19,7 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  web-dashboard:
-    build: .
-    container_name: crypto-web-dashboard
-    restart: unless-stopped
-    command: python web_app.py
-    env_file:
-      - .env
-    environment:
-      - PYTHONUNBUFFERED=1
-      - PYTHONIOENCODING=utf-8
-    ports:
-      - "5000:5000"
-    depends_on:
-      mysql:
-        condition: service_healthy
-    networks:
-      - trend-network
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+
 
   mysql:
     image: mysql:8.0

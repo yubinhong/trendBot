@@ -8,27 +8,11 @@
 - **高频数据收集**：每5分钟收集5分钟K线数据并存储到数据库
 - **智能分析**：基于 ADX、DMI、SMA、布林带、ATR 等技术指标
 - **趋势通知**：任何时间框架趋势变化时自动发送 Telegram 通知
-- **Web监控界面**：实时查看历史趋势数据、数据状态和分析结果
 - **数据管理**：原始数据和趋势分析结果分别存储，自动清理90天前数据
 - **Docker 部署**：完整的容器化解决方案
 - **速率限制处理**：智能重试机制和API调用优化
 
-## Web监控界面
 
-系统提供了一个简洁的Web界面来查看历史数据和监控状态：
-
-### 主要功能
-- **数据状态概览**：显示每个币种的数据收集天数和记录数量
-- **最新趋势展示**：实时显示各时间框架的当前趋势状态
-- **历史趋势查询**：查看过去7天的详细趋势变化记录
-- **ADX强度可视化**：直观显示趋势强度指标
-- **自动刷新**：每分钟自动更新最新趋势数据
-
-### 界面特色
-- 📱 响应式设计，支持手机和桌面访问
-- 🎨 直观的颜色编码和emoji标识
-- 📊 清晰的数据表格和状态卡片
-- ⚡ 快速加载和实时更新
 
 ## 快速开始
 
@@ -46,25 +30,14 @@ cp .env.example .env
 
 ### 3. 启动服务
 ```bash
-# 启动完整服务（包含Web界面）
+# 启动趋势监控机器人
 docker-compose up -d
-
-# 或者只启动趋势监控机器人
-docker-compose up -d trend-bot mysql
 ```
 
-### 4. 访问Web界面
-启动后可以通过以下方式访问Web监控界面：
-- **URL**: http://localhost:5000
-- **功能**: 查看历史趋势数据、数据状态、最新分析结果
-
-### 5. 查看日志
+### 4. 查看日志
 ```bash
 # 查看趋势机器人日志
 docker-compose logs -f trend-bot
-
-# 查看Web界面日志
-docker-compose logs -f web-dashboard
 
 # 查看所有服务日志
 docker-compose logs -f
@@ -72,7 +45,6 @@ docker-compose logs -f
 
 ## 本地开发
 
-### 运行Web界面（开发模式）
 ```bash
 # 安装依赖
 pip install -r requirements.txt
@@ -80,8 +52,8 @@ pip install -r requirements.txt
 # 启动数据库
 docker-compose up -d mysql
 
-# 运行Web界面
-python run_web.py
+# 运行趋势监控机器人
+python main.py
 ```
 
 ## 初始化过程

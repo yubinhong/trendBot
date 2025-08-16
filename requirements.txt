@@ -5,4 +5,3 @@ pandas==2.0.3
 pandas-ta==0.3.14b0
 python-telegram-bot==20.7
 python-dotenv==1.0.0
-flask==3.0.0
