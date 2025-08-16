@@ -5,7 +5,8 @@ let currentSymbol = 'BTC/USDT';
 document.addEventListener('DOMContentLoaded', function() {
     loadDataStatus();
     loadLatestTrends();
-    loadTrendHistory();
+    // 暂时注释掉，因为页面上没有symbolSelect元素
+    // loadTrendHistory();
     
     // 设置自动刷新
     setInterval(function() {
@@ -32,21 +33,38 @@ function displayDataStatus(data) {
     const container = document.getElementById('dataStatus');
     let html = '';
     
-    data.forEach(status => {
-        const coinName = status.symbol.split('/')[0];
-        html += `
-            <div class="col-md-6 mb-3">
-                <div class="data-status-card">
-                    <h6>${coinName}</h6>
-                    <div class="display-6">${status.days_of_data} 天</div>
-                    <small>${status.total_records.toLocaleString()} 条数据</small>
-                    <div class="mt-2">
-                        <small>最新: ${formatDateTime(status.latest_data)}</small>
+    // 检查data是否为数组，如果不是，将对象转换为数组
+    const dataArray = Array.isArray(data) ? data : Object.entries(data).map(([symbol, info]) => {
+        return {
+            symbol: symbol,
+            days_available: info.days_available || 0,
+            total_records: info.total_records || 0,
+            latest_data: info.newest_record || new Date().toISOString()
+        };
+    });
+    
+    if (dataArray.length === 0) {
+        html = '<div class="alert alert-warning">暂无数据</div>';
+    } else {
+        html = '<div class="row">';
+        dataArray.forEach(status => {
+            const coinName = status.symbol.split('/')[0];
+            html += `
+                <div class="col-md-6 mb-3">
+                    <div class="data-status-card">
+                        <h6>${coinName}</h6>
+                        <div class="display-6">${status.days_available || 0} 天</div>
+                        <small>${(status.total_records || 0).toLocaleString()} 条数据</small>
+                        <div class="mt-2">
+                            <small>最新: ${formatDateTime(status.latest_data)}</small>
+                        </div>
                     </div>
                 </div>
-            </div>
-        `;
-    });
+            `;
+        });
+        html += '</div>';
+    }
+    
     
     container.innerHTML = html;
 }
@@ -60,16 +78,23 @@ function loadLatestTrends() {
         })
         .catch(error => {
             console.error('Error loading latest trends:', error);
-            document.getElementById('latestTrends').innerHTML = 
+            document.getElementById('trendsContainer').innerHTML = 
                 '<div class="alert alert-danger">加载最新趋势失败</div>';
         });
 }
 
 // 显示最新趋势
 function displayLatestTrends(data) {
-    const container = document.getElementById('latestTrends');
+    const container = document.getElementById('trendsContainer');
     
-    // 按币种分组
+    // 检查data是否为数组，如果不是，使用原始数据结构
+    if (!Array.isArray(data)) {
+        // 数据已经按币种分组
+        displayGroupedTrends(data, container);
+        return;
+    }
+    
+    // 如果是数组，按币种分组
     const groupedData = {};
     data.forEach(item => {
         if (!groupedData[item.symbol]) {
@@ -78,32 +103,53 @@ function displayLatestTrends(data) {
         groupedData[item.symbol].push(item);
     });
     
+    // 使用分组后的数据显示趋势
+    displayGroupedTrends(groupedData, container);
+}
+
+// 添加displayGroupedTrends函数
+function displayGroupedTrends(groupedData, container) {
     let html = '';
+    
+    if (!groupedData || Object.keys(groupedData).length === 0) {
+        container.innerHTML = '<div class="alert alert-info">暂无趋势数据</div>';
+        return;
+    }
     
     Object.keys(groupedData).forEach(symbol => {
         const coinName = symbol.split('/')[0];
         const trends = groupedData[symbol];
         
         html += `
-            <div class="row mb-3">
-                <div class="col-12">
-                    <h6><i class="fab fa-bitcoin me-2"></i>${coinName}</h6>
+            <div class="card mb-4">
+                <div class="card-header bg-dark text-white">
+                    <h5 class="mb-0">${coinName} 趋势</h5>
+                </div>
+                <div class="card-body">
                     <div class="row">
         `;
         
-        trends.forEach(trend => {
-            const trendClass = getTrendClass(trend.trend);
-            const timeframeName = getTimeframeName(trend.timeframe);
-            const adxInfo = getADXInfo(trend.adx_strength);
+        // 确保trends是数组
+        const trendsArray = Array.isArray(trends) ? trends : [trends];
+        
+        trendsArray.forEach(trend => {
+            // 确保trend对象有所需的属性
+            const trendDirection = trend.trend || 'UNKNOWN';
+            const timeframe = trend.timeframe || 'UNKNOWN';
+            const adxStrength = trend.adx_strength || 0;
+            
+            const trendClass = getTrendClass(trendDirection);
+            const timeframeName = getTimeframeName(timeframe);
+            const adxInfo = getADXInfo(adxStrength);
             
             html += `
-                <div class="col-md-3 col-sm-6 mb-2">
-                    <div class="card border-0 bg-light">
-                        <div class="card-body p-2 text-center">
-                            <div class="timeframe-badge badge bg-secondary mb-1">${timeframeName}</div>
-                            <div class="${trendClass}">${getTrendEmoji(trend.trend)} ${trend.trend}</div>
-                            <div class="mt-1">
-                                <small class="text-muted">ADX: ${trend.adx_strength ? trend.adx_strength.toFixed(1) : 'N/A'}</small>
+                <div class="col-md-3 col-sm-6 mb-3">
+                    <div class="card trend-card ${trendClass}">
+                        <div class="card-body p-3 text-center">
+                            <div class="timeframe-badge badge bg-secondary mb-2">${timeframeName}</div>
+                            <div class="fs-5">${getTrendEmoji(trendDirection)} ${trendDirection}</div>
+                            <div class="mt-2">
+                                <small class="text-muted">ADX: ${adxStrength ? adxStrength.toFixed(1) : 'N/A'}</small>
                                 <div class="adx-indicator mt-1">
                                     <div class="adx-bar ${adxInfo.class}" style="width: ${adxInfo.width}%"></div>
                                 </div>
@@ -125,11 +171,18 @@ function displayLatestTrends(data) {
 }
 
 // 加载趋势历史
-function loadTrendHistory() {
-    const symbol = document.getElementById('symbolSelect').value;
-    currentSymbol = symbol;
+function loadTrendHistory(symbol) {
+    if (!symbol) {
+        symbol = currentSymbol; // 使用全局变量中的默认值
+    }
     
+    // 检查是否存在trendHistory元素
     const container = document.getElementById('trendHistory');
+    if (!container) {
+        console.warn('trendHistory容器不存在');
+        return;
+    }
+    
     container.innerHTML = '<div class="text-center"><div class="spinner-border" role="status"></div></div>';
     
     fetch(`/api/trends/${encodeURIComponent(symbol)}`)

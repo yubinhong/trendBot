@@ -95,24 +95,16 @@ def get_trends():
             timeframe = trend['timeframe']
             
             if symbol not in grouped_trends:
-                grouped_trends[symbol] = {}
+                grouped_trends[symbol] = []
             
-            if timeframe not in grouped_trends[symbol]:
-                grouped_trends[symbol][timeframe] = []
-            
-            grouped_trends[symbol][timeframe].append(trend)
-        
-        # 只保留每个时间框架的最新趋势
-        latest_trends = {}
-        for symbol in grouped_trends:
-            latest_trends[symbol] = {}
-            for timeframe in grouped_trends[symbol]:
-                latest_trends[symbol][timeframe] = grouped_trends[symbol][timeframe][0]
+            # 将趋势添加到对应币种的列表中
+            grouped_trends[symbol].append(trend)
         
         cursor.close()
         conn.close()
         
-        return jsonify(latest_trends)
+        # 返回按币种分组的趋势数据，这种格式与app.js中的displayGroupedTrends函数兼容
+        return jsonify(grouped_trends)
     
     except Exception as e:
         return jsonify({'error': f'获取趋势数据失败: {str(e)}'}), 500
