@@ -339,8 +339,16 @@ def calculate_indicators_from_5min_data(symbol, timeframe_minutes):
         cursor.close()
         conn.close()
         
-        if len(raw_data) < periods_per_timeframe * 50:  # 至少需要50个目标周期的数据
-            logger.warning(f"Insufficient 5min data for {symbol} {timeframe_minutes}m analysis: {len(raw_data)} records")
+        # 根据时间框架调整最小数据要求（更实用的阈值）
+        min_periods_needed = {
+            15: 20,    # 15分钟需要20个周期 (约5小时)
+            60: 25,    # 1小时需要25个周期 (约1天)  
+            240: 15,   # 4小时需要15个周期 (约2.5天)
+            1440: 10   # 1天需要10个周期 (约10天)
+        }.get(timeframe_minutes, 20)
+        
+        if len(raw_data) < periods_per_timeframe * min_periods_needed:
+            logger.warning(f"Insufficient 5min data for {symbol} {timeframe_minutes}m analysis: {len(raw_data)} records (need {periods_per_timeframe * min_periods_needed})")
             return None
         
         logger.debug(f"Retrieved {len(raw_data)} 5min records for {symbol}")
@@ -348,8 +356,16 @@ def calculate_indicators_from_5min_data(symbol, timeframe_minutes):
         # 将5分钟数据聚合为目标时间框架
         aggregated_data = aggregate_5min_to_timeframe(raw_data, timeframe_minutes)
         
-        if len(aggregated_data) < 200:  # 需要至少200个周期来计算SMA200
-            logger.warning(f"Insufficient aggregated data for {symbol} {timeframe_minutes}m: {len(aggregated_data)} periods")
+        # 根据时间框架调整聚合数据的最小要求（实用阈值）
+        min_aggregated_periods = {
+            15: 20,    # 15分钟需要20个聚合周期
+            60: 25,    # 1小时需要25个聚合周期
+            240: 15,   # 4小时需要15个聚合周期
+            1440: 10   # 1天需要10个聚合周期
+        }.get(timeframe_minutes, 20)
+        
+        if len(aggregated_data) < min_aggregated_periods:
+            logger.warning(f"Insufficient aggregated data for {symbol} {timeframe_minutes}m: {len(aggregated_data)} periods (need {min_aggregated_periods})")
             return None
         
         logger.debug(f"Aggregated to {len(aggregated_data)} {timeframe_minutes}min periods")
@@ -672,9 +688,9 @@ def generate_insight(symbol, trend, indicators=None, timeframe="5m"):
         risk_warning = "⚠️趋势强度较弱，注意反转风险"
     
     base_insights = {
-        "上涨趋势": f"[{tf_name}]基于当前强势ADX和+DI主导，预计继续上涨趋势，可能测试更高阻力位。{validity_info}。{risk_warning}",
-        "下跌趋势": f"[{tf_name}]当前-DI主导且SMA交叉向下，预计延续下跌，关注支撑位。{validity_info}。{risk_warning}",
-        "区间/波动小": f"[{tf_name}]ADX低位且波动率低，预计维持震荡，等待突破信号。{validity_info}。{risk_warning}"
+        "上涨趋势": f"强势上涨信号，ADX和+DI主导，可能测试更高阻力位。{validity_info}。{risk_warning}",
+        "下跌趋势": f"下跌信号确认，-DI主导且均线向下，关注支撑位。{validity_info}。{risk_warning}",
+        "区间/波动小": f"低波动震荡，ADX较低，等待方向性突破。{validity_info}。{risk_warning}"
     }
     
     if trend in base_insights:
@@ -1282,27 +1298,74 @@ if __name__ == "__main__":
             
             # 发送通知（如果有趋势变化）
             if trend_changed:
-                message = "🔄 加密货币多时间框架趋势更新\n\n"
+                # 生成优化的通知消息
+                message = "🚨 趋势变化提醒\n"
+                message += f"⏰ {datetime.now().strftime('%H:%M')}\n\n"
                 
                 for symbol in symbols:
                     coin_name = symbol.split('/')[0]
-                    message += f"💰 {coin_name}:\n"
-                    
                     trends = all_trends[symbol]
                     insights = all_insights[symbol]
                     
-                    # 只显示主要时间框架
+                    # 检查数据状态
+                    data_status = check_data_sufficiency(symbol)
+                    total_records = data_status.get('total_records', 0) if data_status else 0
+                    days_available = total_records / 288 if total_records > 0 else 0
+                    
+                    # 币种标题
+                    message += f"💎 {coin_name} 趋势分析\n"
+                    message += f"📈 数据: {days_available:.1f}天 ({total_records}条)\n"
+                    
+                    # 趋势状态（使用emoji表示）
+                    trend_emojis = {
+                        "上涨趋势": "🟢",
+                        "下跌趋势": "🔴", 
+                        "区间/波动小": "🟡",
+                        "未知": "⚪",
+                        "数据不足": "⏳",
+                        "数据积累中": "⏳"
+                    }
+                    
                     main_timeframes = ["15m", "1h", "4h", "1d"]
                     for tf in main_timeframes:
                         if tf in trends:
                             tf_name = {"15m": "15分钟", "1h": "1小时", "4h": "4小时", "1d": "1天"}[tf]
-                            message += f"  {tf_name}: {trends[tf]}\n"
+                            trend = trends[tf]
+                            emoji = trend_emojis.get(trend, "❓")
+                            
+                            # 添加分析质量标识
+                            quality_indicator = ""
+                            if tf == "4h" and days_available < 30:
+                                quality_indicator = " (基础)"
+                            elif tf == "1d" and days_available < 200:
+                                quality_indicator = " (基础)"
+                            
+                            message += f"  {emoji} {tf_name}: {trend}{quality_indicator}\n"
                     
-                    # 添加1天的详细分析
-                    if "1d" in insights:
-                        message += f"  📊 {insights['1d']}\n"
+                    # 添加关键洞察（选择最重要的时间框架）
+                    key_insight = None
+                    for tf in ["1d", "4h", "1h", "15m"]:  # 优先级顺序
+                        if tf in insights and not insights[tf].startswith("["):
+                            # 简化洞察文本
+                            insight_text = insights[tf]
+                            if "基于当前强势ADX" in insight_text:
+                                key_insight = f"💡 强势{trends.get(tf, '未知')}信号"
+                            elif "ADX低位且波动率低" in insight_text:
+                                key_insight = "💡 低波动震荡，等待突破"
+                            elif "信号混合" in insight_text:
+                                key_insight = "💡 信号混合，观察关键位"
+                            break
+                    
+                    if key_insight:
+                        message += f"  {key_insight}\n"
                     
                     message += "\n"
+                
+                # 添加数据质量说明
+                message += "ℹ️ 说明:\n"
+                message += "🟢上涨 🔴下跌 🟡震荡 ⚪混合 ⏳积累中\n"
+                message += "(基础)=数据积累中，分析会持续改善\n"
+                message += f"📊 每5分钟更新 | 数据保留250天"
                 
                 logger.info("Multi-timeframe trend changes detected, sending notification...")
                 send_to_telegram(message.strip())
