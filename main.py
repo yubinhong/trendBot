@@ -243,7 +243,11 @@ def determine_trend(indicators, timeframe="5m"):
     adx_moderate_threshold = 20
     sma_diff_threshold = 0.02
     
-    if timeframe == "15m":
+    if timeframe == "5m":
+        adx_strong_threshold = 40  # 5分钟需要非常强的信号
+        adx_moderate_threshold = 35
+        sma_diff_threshold = 0.005
+    elif timeframe == "15m":
         adx_strong_threshold = 35  # 15分钟需要更强的信号
         adx_moderate_threshold = 30
         sma_diff_threshold = 0.008
@@ -574,6 +578,7 @@ def check_data_sufficiency(symbol):
         sufficiency = {
             "total_records": total_count,
             "recent_records": recent_count,
+            "can_analyze_5m": total_count >= 20,      # 需要至少20个5分钟数据点
             "can_analyze_15m": total_count >= 60,     # 需要至少5小时数据
             "can_analyze_1h": total_count >= 240,     # 需要至少20小时数据  
             "can_analyze_4h": total_count >= 720,     # 需要至少2.5天数据（基础分析）
@@ -589,6 +594,7 @@ def check_data_sufficiency(symbol):
 def analyze_multiple_timeframes(symbol):
     """基于数据库中的5分钟数据分析多个时间框架的趋势"""
     timeframes = {
+        "5m": {"minutes": 5, "name": "5分钟"},
         "15m": {"minutes": 15, "name": "15分钟"},
         "1h": {"minutes": 60, "name": "1小时"},
         "4h": {"minutes": 240, "name": "4小时"}, 
@@ -654,6 +660,7 @@ def analyze_multiple_timeframes(symbol):
 def get_trend_validity_period(timeframe, adx_strength):
     """估算趋势预测的有效期"""
     base_periods = {
+        "5m": {"min": 10, "max": 30, "unit": "分钟"},
         "15m": {"min": 1, "max": 4, "unit": "小时"},
         "1h": {"min": 4, "max": 24, "unit": "小时"},
         "4h": {"min": 1, "max": 7, "unit": "天"},
@@ -681,7 +688,7 @@ def get_trend_validity_period(timeframe, adx_strength):
 
 def generate_insight(symbol, trend, indicators=None, timeframe="5m"):
     timeframe_names = {
-        "15m": "15分钟", "1h": "1小时", "4h": "4小时", 
+        "5m": "5分钟", "15m": "15分钟", "1h": "1小时", "4h": "4小时", 
         "1d": "1天"
     }
     
@@ -693,7 +700,9 @@ def generate_insight(symbol, trend, indicators=None, timeframe="5m"):
     
     # 添加风险提醒
     risk_warning = ""
-    if timeframe in ["15m", "1h"]:
+    if timeframe == "5m":
+        risk_warning = "⚠️超短期趋势波动大，仅供参考，不建议单独作为交易依据"
+    elif timeframe in ["15m", "1h"]:
         risk_warning = "⚠️短期趋势易受突发事件影响"
     elif adx_strength < 20:
         risk_warning = "⚠️趋势强度较弱，注意反转风险"
@@ -782,6 +791,7 @@ def store_trend_analysis(symbol, timeframe, trend, insight, adx_strength=0):
         
         # 计算预期有效期（小时）
         validity_hours = {
+            "5m": 0.5 if adx_strength > 30 else 0.25,  # 30分钟 vs 15分钟
             "15m": 2 if adx_strength > 30 else 1,
             "1h": 12 if adx_strength > 30 else 6,
             "4h": 72 if adx_strength > 30 else 24,
@@ -1177,11 +1187,11 @@ def send_to_telegram(message):
 
 if __name__ == "__main__":
     symbols = ["BTC/USDT", "ETH/USDT"]
-    last_trends = {sym: {tf: None for tf in ["15m", "1h", "4h", "1d"]} for sym in symbols}
+    last_trends = {sym: {tf: None for tf in ["5m", "15m", "1h", "4h", "1d"]} for sym in symbols}
     
     logger.info("Multi-timeframe crypto trend bot started successfully...")
-    logger.info("Data strategy: Collect 5min data from API, calculate 15m/1h/4h/1d trends from database")
-    logger.info("Monitoring timeframes: 15m, 1h, 4h, 1d")
+    logger.info("Data strategy: Collect 5min data from API, calculate 5m/15m/1h/4h/1d trends from database")
+    logger.info("Monitoring timeframes: 5m, 15m, 1h, 4h, 1d")
     logger.info("Data retention: 250 days for 5min data, 90 days for trends, cleanup daily at midnight")
     
     # 首先确保数据库表存在
@@ -1242,7 +1252,7 @@ if __name__ == "__main__":
             sufficiency = check_data_sufficiency(symbol)
             if sufficiency:
                 available_timeframes = []
-                for tf in ["15m", "1h", "4h", "1d"]:
+                for tf in ["5m", "15m", "1h", "4h", "1d"]:
                     if sufficiency.get(f"can_analyze_{tf}", False):
                         available_timeframes.append(tf)
                 
@@ -1296,8 +1306,11 @@ if __name__ == "__main__":
                 all_insights[symbol] = symbol_insights
                 
                 # 检查是否有趋势变化
-                for timeframe in ["15m", "1h", "4h", "1d"]:
+                for timeframe in ["5m", "15m", "1h", "4h", "1d"]:
                     current_trend = symbol_trends.get(timeframe, "未知")
+                    # 初始化last_trends中不存在的时间框架
+                    if timeframe not in last_trends[symbol]:
+                        last_trends[symbol][timeframe] = "未知"
                     if current_trend != last_trends[symbol][timeframe]:
                         trend_changed = True
                         logger.info(f"{symbol} [{timeframe}] 趋势变化: {last_trends[symbol][timeframe]} -> {current_trend}")
@@ -1337,10 +1350,10 @@ if __name__ == "__main__":
                         "数据积累中": "⏳"
                     }
                     
-                    main_timeframes = ["15m", "1h", "4h", "1d"]
+                    main_timeframes = ["5m", "15m", "1h", "4h", "1d"]
                     for tf in main_timeframes:
                         if tf in trends:
-                            tf_name = {"15m": "15分钟", "1h": "1小时", "4h": "4小时", "1d": "1天"}[tf]
+                            tf_name = {"5m": "5分钟", "15m": "15分钟", "1h": "1小时", "4h": "4小时", "1d": "1天"}[tf]
                             trend = trends[tf]
                             emoji = trend_emojis.get(trend, "❓")
                             
@@ -1355,7 +1368,7 @@ if __name__ == "__main__":
                     
                     # 添加关键洞察（选择最重要的时间框架）
                     key_insight = None
-                    for tf in ["1d", "4h", "1h", "15m"]:  # 优先级顺序
+                    for tf in ["1d", "4h", "1h", "15m", "5m"]:  # 优先级顺序
                         if tf in insights and not insights[tf].startswith("["):
                             # 简化洞察文本
                             insight_text = insights[tf]
