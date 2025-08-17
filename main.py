@@ -56,7 +56,7 @@ logger.info(f"API Rate Limit Buffer: {API_RATE_LIMIT_BUFFER}")
 # 初始化组件
 db_manager = DatabaseManager(MYSQL_HOST, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB)
 api_client = BinanceAPIClient(API_RATE_LIMIT_BUFFER)
-technical_analyzer = TechnicalAnalyzer(db_manager, VOLATILITY_THRESHOLD, SMART_GRANULARITY, DATA_GRANULARITY)
+technical_analyzer = TechnicalAnalyzer(db_manager, VOLATILITY_THRESHOLD)
 quality_monitor = DataQualityMonitor(db_manager, api_client)
 notification_manager = NotificationManager()
 
