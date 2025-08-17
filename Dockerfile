@@ -13,6 +13,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY main.py ./
+COPY database.py ./
+COPY api_client.py ./
+COPY technical_analysis.py ./
+COPY quality_monitor.py ./
+COPY notification.py ./
 
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
