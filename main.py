@@ -279,7 +279,8 @@ def initialize_historical_data(symbol: str, limit: int = 60000) -> bool:
                 # 设置下一批次的结束时间（当前批次最早的时间戳）
                 if klines:
                     # 获取当前批次最早的时间戳，减1毫秒作为下一批次的endTime
-                    earliest_timestamp = min(int(k['timestamp']) for k in klines)
+                    # timestamp是datetime对象，需要转换为毫秒时间戳
+                    earliest_timestamp = min(int(k['timestamp'].timestamp() * 1000) for k in klines)
                     end_time = earliest_timestamp - 1
                 
                 # 批次间延迟，避免API限制
