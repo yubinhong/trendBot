@@ -10,12 +10,12 @@ class NotificationManager:
     """通知管理器"""
     
     def __init__(self):
-        self.telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
+        self.telegram_bot_token = os.getenv('TELEGRAM_TOKEN')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
         self.telegram_enabled = bool(self.telegram_bot_token and self.telegram_chat_id)
         
         if not self.telegram_enabled:
-            logger.warning("Telegram notifications disabled: missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+            logger.warning("Telegram notifications disabled: missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID")
     
     def send_telegram_message(self, message: str, parse_mode: str = 'Markdown') -> bool:
         """发送Telegram消息"""

@@ -349,12 +349,21 @@ def main():
     
     # 初始化历史数据（如果未跳过）
     if not SKIP_INITIALIZATION:
-        logger.info("Starting historical data initialization...")
+        logger.info("Checking existing data before initialization...")
         initialization_results = {}
         
         for symbol in symbols:
             try:
-                logger.info(f"Initializing data for {symbol}...")
+                # 检查数据库中是否已有足够数据
+                data_status = check_data_sufficiency(symbol)
+                total_records = data_status.get('total_records', 0)
+                
+                if total_records >= 50000:  # 如果已有50000条以上数据，跳过初始化
+                    logger.info(f"✓ {symbol} already has sufficient data ({total_records} records), skipping initialization")
+                    initialization_results[symbol] = True
+                    continue
+                
+                logger.info(f"Initializing data for {symbol} (current: {total_records} records)...")
                 
                 # 增加到60000条历史数据
                 success = initialize_historical_data(symbol, 60000)
