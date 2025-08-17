@@ -318,7 +318,9 @@ class TechnicalAnalyzer:
                     'insights': '数据不足',
                     'accuracy': 0,
                     'sentiment': '中性',
-                    'volatility': '中'
+                    'volatility': '中',
+                    'adx': 0,
+                    'trend_strength': '无'
                 }
             
             # 转换为DataFrame进行分析
@@ -329,21 +331,67 @@ class TechnicalAnalyzer:
             df['sma_short'] = ta.sma(df['close'], length=10)
             df['sma_long'] = ta.sma(df['close'], length=20)
             
-            # 分析趋势
-            current_price = df['close'].iloc[-1]
-            sma_short = df['sma_short'].iloc[-1]
-            sma_long = df['sma_long'].iloc[-1]
+            # 计算ADX指标
+            adx_data = ta.adx(df['high'], df['low'], df['close'], length=14)
+            df['adx'] = adx_data['ADX_14']
+            df['plus_di'] = adx_data['DMP_14']
+            df['minus_di'] = adx_data['DMN_14']
             
-            # 趋势判断
+            # 获取最新值
+            current_price = df['close'].iloc[-1]
+            sma_short = df['sma_short'].iloc[-1] if not pd.isna(df['sma_short'].iloc[-1]) else current_price
+            sma_long = df['sma_long'].iloc[-1] if not pd.isna(df['sma_long'].iloc[-1]) else current_price
+            current_adx = df['adx'].iloc[-1] if not pd.isna(df['adx'].iloc[-1]) else 0
+            current_plus_di = df['plus_di'].iloc[-1] if not pd.isna(df['plus_di'].iloc[-1]) else 0
+            current_minus_di = df['minus_di'].iloc[-1] if not pd.isna(df['minus_di'].iloc[-1]) else 0
+            
+            # 判断趋势强度
+            if current_adx > 30:
+                trend_strength = '强'
+            elif current_adx > 20:
+                trend_strength = '中'
+            else:
+                trend_strength = '弱'
+            
+            # 趋势方向判断（结合移动平均线和DMI）
+            ma_trend = ''
             if current_price > sma_short > sma_long:
-                direction = '上涨'
-                confidence = min(95, 60 + (current_price - sma_long) / sma_long * 100)
+                ma_trend = '上涨'
             elif current_price < sma_short < sma_long:
-                direction = '下跌'
-                confidence = min(95, 60 + (sma_long - current_price) / sma_long * 100)
+                ma_trend = '下跌'
+            else:
+                ma_trend = '震荡'
+            
+            # DMI方向判断
+            dmi_trend = ''
+            if current_plus_di > current_minus_di + 2:  # 加入缓冲区避免频繁切换
+                dmi_trend = '上涨'
+            elif current_minus_di > current_plus_di + 2:
+                dmi_trend = '下跌'
+            else:
+                dmi_trend = '震荡'
+            
+            # 综合判断趋势方向
+            if ma_trend == dmi_trend and ma_trend != '震荡':
+                direction = ma_trend
+                base_confidence = 70
+            elif ma_trend != '震荡':
+                direction = ma_trend
+                base_confidence = 55
+            elif dmi_trend != '震荡':
+                direction = dmi_trend
+                base_confidence = 50
             else:
                 direction = '震荡'
-                confidence = 40
+                base_confidence = 30
+            
+            # 根据ADX调整置信度
+            if current_adx > 30:
+                confidence = min(95, base_confidence + 20)
+            elif current_adx > 20:
+                confidence = min(85, base_confidence + 10)
+            else:
+                confidence = max(20, base_confidence - 15)
             
             # 计算支撑阻力位
             recent_lows = df['low'].tail(20)
@@ -351,15 +399,22 @@ class TechnicalAnalyzer:
             support = recent_lows.min()
             resistance = recent_highs.max()
             
+            # 生成洞察信息
+            insights = f'{timeframe_minutes}分钟级别{direction}趋势'
+            if trend_strength != '无':
+                insights += f'({trend_strength}趋势,ADX:{current_adx:.1f})'
+            
             return {
                 'direction': direction,
                 'confidence': confidence,
                 'support': support,
                 'resistance': resistance,
-                'insights': f'{timeframe_minutes}分钟级别{direction}趋势',
+                'insights': insights,
                 'accuracy': confidence,
                 'sentiment': '贪婪' if direction == '上涨' else '恐惧' if direction == '下跌' else '中性',
-                'volatility': '高' if self.detect_high_volatility(symbol) else '中'
+                'volatility': '高' if self.detect_high_volatility(symbol) else '中',
+                'adx': current_adx,
+                'trend_strength': trend_strength
             }
             
         except Exception as e:

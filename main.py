@@ -112,7 +112,19 @@ def send_individual_trend_notification(symbol: str, trends: Dict[str, str], insi
             tf_name = {"5m": "5分钟", "15m": "15分钟", "1h": "1小时", "4h": "4小时", "1d": "1天"}[timeframe]
             old_emoji = trend_emojis.get(old_trend, "❓")
             new_emoji = trend_emojis.get(new_trend, "❓")
-            message += f"  {tf_name}: {old_emoji}{old_trend} → {new_emoji}{new_trend}\n"
+            
+            # 获取趋势强度信息
+            strength_info = ""
+            if timeframe in insights and insights[timeframe]:
+                insight_text = insights[timeframe]
+                if "强趋势" in insight_text:
+                    strength_info = "💪"
+                elif "中趋势" in insight_text:
+                    strength_info = "📈"
+                elif "弱趋势" in insight_text:
+                    strength_info = "📉"
+            
+            message += f"  {tf_name}: {old_emoji}{old_trend} → {new_emoji}{new_trend}{strength_info}\n"
         
         message += "\n📈 当前所有时间框架:\n"
         main_timeframes = ["5m", "15m", "1h", "4h", "1d"]
@@ -122,6 +134,17 @@ def send_individual_trend_notification(symbol: str, trends: Dict[str, str], insi
                 trend = trends[tf]
                 emoji = trend_emojis.get(trend, "❓")
                 
+                # 获取趋势强度信息
+                strength_info = ""
+                if tf in insights and insights[tf]:
+                    insight_text = insights[tf]
+                    if "强趋势" in insight_text:
+                        strength_info = "💪"
+                    elif "中趋势" in insight_text:
+                        strength_info = "📈"
+                    elif "弱趋势" in insight_text:
+                        strength_info = "📉"
+                
                 # 添加分析质量标识
                 quality_indicator = ""
                 if tf == "4h" and days_available < 30:
@@ -129,11 +152,12 @@ def send_individual_trend_notification(symbol: str, trends: Dict[str, str], insi
                 elif tf == "1d" and days_available < 200:
                     quality_indicator = " (基础)"
                 
-                message += f"  {emoji} {tf_name}: {trend}{quality_indicator}\n"
+                message += f"  {emoji} {tf_name}: {trend}{strength_info}{quality_indicator}\n"
         
         # 添加数据质量说明
         message += "\nℹ️ 说明:\n"
         message += "🟢上涨 🔴下跌 🟡震荡 ⚪混合 ⏳积累中\n"
+        message += "💪强趋势 📈中等趋势 📉弱趋势\n"
         message += "(基础)=数据积累中，分析会持续改善\n"
         message += f"📊 每5分钟更新 | 数据保留250天"
         
