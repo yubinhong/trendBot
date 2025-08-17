@@ -150,33 +150,53 @@ def check_data_sufficiency(symbol: str) -> Dict[str, Any]:
         conn = db_manager.get_connection()
         cursor = conn.cursor()
         
+        # 检查总数据量（用于初始化判断）
+        cursor.execute("""
+            SELECT COUNT(*) FROM crypto_5min_data 
+            WHERE symbol = %s
+        """, (symbol,))
+        
+        total_records = cursor.fetchone()[0]
+        
+        # 检查最近30天的数据量（用于分析可行性判断）
         cursor.execute("""
             SELECT COUNT(*) FROM crypto_5min_data 
             WHERE symbol = %s AND timestamp >= DATE_SUB(NOW(), INTERVAL 30 DAY)
         """, (symbol,))
         
-        total_records = cursor.fetchone()[0]
+        recent_30d_records = cursor.fetchone()[0]
         cursor.close()
         conn.close()
         
         # 计算可用天数（每天288个5分钟数据点）
-        days_available = total_records / 288 if total_records > 0 else 0
+        days_available = recent_30d_records / 288 if recent_30d_records > 0 else 0
+        total_days_available = total_records / 288 if total_records > 0 else 0
         
         return {
             'total_records': total_records,
+            'recent_30d_records': recent_30d_records,
             'days_available': days_available,
-            'can_analyze_5m': total_records >= 50,
-            'can_analyze_15m': total_records >= 100,
-            'can_analyze_1h': total_records >= 200,
-            'can_analyze_4h': total_records >= 500,
-            'can_analyze_1d': total_records >= 2000
+            'total_days_available': total_days_available,
+            # 分析可行性基于总数据量，因为技术指标需要足够的历史数据
+            # 5分钟：需要至少200个数据点（约17小时）
+            'can_analyze_5m': total_records >= 200,
+            # 15分钟：需要至少200个数据点（约50小时）
+            'can_analyze_15m': total_records >= 600,
+            # 1小时：需要至少200个数据点（200小时 = 2400条5分钟记录）
+            'can_analyze_1h': total_records >= 2400,
+            # 4小时：需要至少200个数据点（800小时 = 9600条5分钟记录）
+            'can_analyze_4h': total_records >= 9600,
+            # 1天：需要至少200个数据点（约200天）
+            'can_analyze_1d': total_records >= 57600
         }
         
     except Exception as e:
         logger.error(f"Error checking data sufficiency for {symbol}: {str(e)}")
         return {
             'total_records': 0,
+            'recent_30d_records': 0,
             'days_available': 0,
+            'total_days_available': 0,
             'can_analyze_5m': False,
             'can_analyze_15m': False,
             'can_analyze_1h': False,
@@ -206,7 +226,7 @@ def analyze_multiple_timeframes(symbol: str) -> tuple[Dict[str, str], Dict[str, 
             can_analyze_key = f"can_analyze_{tf_name}"
             if not data_status.get(can_analyze_key, False):
                 trends[tf_name] = "数据积累中"
-                insights[tf_name] = f"[需要更多数据] 当前: {data_status['total_records']}条记录"
+                insights[tf_name] = f"[需要更多数据] 总计: {data_status['total_records']}条记录 ({data_status['total_days_available']:.1f}天)"
                 continue
             
             # 使用技术分析器分析趋势
