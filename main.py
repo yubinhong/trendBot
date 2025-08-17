@@ -424,10 +424,16 @@ def main():
                 
                 # 获取最新的5分钟数据并存储
                 try:
-                    indicators_5m = technical_analyzer.fetch_current_data(symbol)
-                    if indicators_5m:
-                        db_manager.store_5min_data(symbol, indicators_5m, "5m")
-                        logger.info(f"Stored latest 5min data for {symbol}")
+                    # 通过API获取最新的K线数据
+                    latest_klines = api_client.fetch_binance_klines(symbol, '5m', 1)
+                    if latest_klines:
+                        # 存储最新的K线数据到数据库
+                        success = db_manager.store_historical_klines_bulk(symbol, latest_klines, '5m')
+                        if success:
+                            logger.info(f"Stored latest 5min data for {symbol}")
+                        else:
+                            logger.error(f"Failed to store 5min data for {symbol}")
+                            continue
                     else:
                         logger.error(f"Failed to get 5min data for {symbol}")
                         continue  # 如果无法获取5分钟数据，跳过这个symbol
