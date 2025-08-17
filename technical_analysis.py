@@ -306,10 +306,10 @@ class TechnicalAnalyzer:
             if isinstance(timeframe_minutes, str):
                 timeframe_minutes = int(timeframe_minutes)
             
-            # 获取聚合数据
-            data = self.aggregate_to_timeframe(symbol, timeframe_minutes, 100)
+            # 获取聚合数据（长期趋势分析需要更多数据点）
+            data = self.aggregate_to_timeframe(symbol, timeframe_minutes, 250)
             
-            if len(data) < 20:
+            if len(data) < 200:
                 return {
                     'direction': '未知',
                     'confidence': 0,
@@ -327,9 +327,9 @@ class TechnicalAnalyzer:
             df = pd.DataFrame(data)
             df = df.sort_values('timestamp')
             
-            # 计算移动平均线
-            df['sma_short'] = ta.sma(df['close'], length=10)
-            df['sma_long'] = ta.sma(df['close'], length=20)
+            # 计算移动平均线（长期趋势分析）
+            df['sma_short'] = ta.sma(df['close'], length=50)
+            df['sma_long'] = ta.sma(df['close'], length=200)
             
             # 计算ADX指标
             adx_data = ta.adx(df['high'], df['low'], df['close'], length=14)
@@ -345,10 +345,10 @@ class TechnicalAnalyzer:
             current_plus_di = df['plus_di'].iloc[-1] if not pd.isna(df['plus_di'].iloc[-1]) else 0
             current_minus_di = df['minus_di'].iloc[-1] if not pd.isna(df['minus_di'].iloc[-1]) else 0
             
-            # 判断趋势强度
-            if current_adx > 30:
+            # 判断趋势强度（长期趋势分析调整阈值）
+            if current_adx > 25:
                 trend_strength = '强'
-            elif current_adx > 20:
+            elif current_adx > 15:
                 trend_strength = '中'
             else:
                 trend_strength = '弱'
@@ -385,17 +385,17 @@ class TechnicalAnalyzer:
                 direction = '震荡'
                 base_confidence = 30
             
-            # 根据ADX调整置信度
-            if current_adx > 30:
+            # 根据ADX调整置信度（长期趋势分析调整阈值）
+            if current_adx > 25:
                 confidence = min(95, base_confidence + 20)
-            elif current_adx > 20:
+            elif current_adx > 15:
                 confidence = min(85, base_confidence + 10)
             else:
                 confidence = max(20, base_confidence - 15)
             
-            # 计算支撑阻力位
-            recent_lows = df['low'].tail(20)
-            recent_highs = df['high'].tail(20)
+            # 计算支撑阻力位（长期趋势分析使用更长周期）
+            recent_lows = df['low'].tail(50)
+            recent_highs = df['high'].tail(50)
             support = recent_lows.min()
             resistance = recent_highs.max()
             
