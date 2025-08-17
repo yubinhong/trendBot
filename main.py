@@ -209,27 +209,26 @@ def analyze_multiple_timeframes(symbol: str) -> tuple[Dict[str, str], Dict[str, 
                 insights[tf_name] = f"[需要更多数据] 当前: {data_status['total_records']}条记录"
                 continue
             
-            # 使用技术分析器计算指标
-            indicators = technical_analyzer.calculate_indicators_from_5min_data(symbol, tf_minutes)
+            # 使用技术分析器分析趋势
+            trend_result = technical_analyzer.analyze_trend(symbol, tf_minutes)
             
-            if indicators:
-                trend = technical_analyzer.analyze_trend(indicators, tf_name)
+            if trend_result and trend_result.get('direction') != '未知':
+                trend = trend_result['direction']
                 trends[tf_name] = trend
                 
                 # 生成洞察
-                adx = indicators.get('adx', 0)
-                pdi = indicators.get('pdi', 0)
-                mdi = indicators.get('mdi', 0)
+                confidence = trend_result.get('confidence', 0)
+                insights_text = trend_result.get('insights', '')
                 
-                if adx > 30:
-                    if pdi > mdi:
-                        insights[tf_name] = f"基于当前强势ADX({adx:.1f})和+DI优势，{trend}信号较强"
-                    else:
-                        insights[tf_name] = f"基于当前强势ADX({adx:.1f})和-DI优势，{trend}信号较强"
-                elif adx < 20:
-                    insights[tf_name] = f"ADX低位({adx:.1f})且波动率低，市场处于{trend}状态"
+                if confidence > 70:
+                    insights[tf_name] = f"高置信度({confidence:.1f}%)，{trend}信号强烈"
+                elif confidence > 50:
+                    insights[tf_name] = f"中等置信度({confidence:.1f}%)，{trend}信号较明确"
                 else:
-                    insights[tf_name] = f"信号混合，ADX中等({adx:.1f})，{trend}需要确认"
+                    insights[tf_name] = f"低置信度({confidence:.1f}%)，{trend}信号需要确认"
+                    
+                if insights_text:
+                    insights[tf_name] += f" - {insights_text}"
             else:
                 trends[tf_name] = "数据不足"
                 insights[tf_name] = "无法计算技术指标"

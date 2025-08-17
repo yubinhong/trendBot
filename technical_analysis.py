@@ -111,6 +111,10 @@ class TechnicalAnalyzer:
     def aggregate_to_timeframe(self, symbol: str, timeframe_minutes: int = 15, limit: int = 1000) -> List[Dict[str, Any]]:
         """将5分钟数据聚合为指定时间框架"""
         try:
+            # 确保timeframe_minutes是整数类型
+            if isinstance(timeframe_minutes, str):
+                timeframe_minutes = int(timeframe_minutes)
+            
             # 从数据库获取5分钟数据
             data = self.db_manager.get_historical_data(symbol, 5, limit * (timeframe_minutes // 5))
             
@@ -298,6 +302,10 @@ class TechnicalAnalyzer:
     def analyze_trend(self, symbol: str, timeframe_minutes: int = 15) -> Dict[str, Any]:
         """分析趋势方向"""
         try:
+            # 确保timeframe_minutes是整数类型
+            if isinstance(timeframe_minutes, str):
+                timeframe_minutes = int(timeframe_minutes)
+            
             # 获取聚合数据
             data = self.aggregate_to_timeframe(symbol, timeframe_minutes, 100)
             
