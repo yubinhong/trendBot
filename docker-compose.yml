@@ -1,7 +1,7 @@
 services:
-  trend-bot:
+  short-trend-bot:
     build: .
-    container_name: crypto-trend-bot
+    container_name: short-crypto-trend-bot
     restart: unless-stopped
     env_file:
       - .env
@@ -9,10 +9,10 @@ services:
       - PYTHONUNBUFFERED=1
       - PYTHONIOENCODING=utf-8
     depends_on:
-      mysql:
+      short-trend-mysql:
         condition: service_healthy
     networks:
-      - trend-network
+      - short-trend-network
     logging:
       driver: "json-file"
       options:
@@ -21,9 +21,9 @@ services:
 
 
 
-  mysql:
+  short-trend-mysql:
     image: mysql:8.0
-    container_name: trend-mysql
+    container_name: short-trend-mysql
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
@@ -35,7 +35,7 @@ services:
     ports:
       - "3306:3306"
     networks:
-      - trend-network
+      - short-trend-network
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       timeout: 20s
@@ -45,5 +45,5 @@ volumes:
   mysql_data:
 
 networks:
-  trend-network:
+  short-trend-network:
     driver: bridge
