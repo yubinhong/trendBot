@@ -35,7 +35,7 @@ MYSQL_DB = os.getenv('MYSQL_DB')
 SKIP_INITIALIZATION = os.getenv('SKIP_INITIALIZATION', 'false').lower() == 'true'
 
 # Data granularity configuration
-DATA_GRANULARITY = os.getenv('DATA_GRANULARITY', '5m')  # '1m' or '5m'
+DATA_GRANULARITY = os.getenv('DATA_GRANULARITY', '1m')  # '1m' or '5m'
 SMART_GRANULARITY = os.getenv('SMART_GRANULARITY', 'true').lower() == 'true'
 VOLATILITY_THRESHOLD = float(os.getenv('VOLATILITY_THRESHOLD', '2.0'))  # ATR multiplier for high volatility
 API_RATE_LIMIT_BUFFER = float(os.getenv('API_RATE_LIMIT_BUFFER', '0.8'))  # Use 80% of API limit
@@ -91,7 +91,7 @@ def send_individual_trend_notification(symbol: str, trends: Dict[str, str], insi
         # 检查数据状态
         data_status = check_data_sufficiency(symbol)
         total_records = data_status.get('total_records', 0)
-        days_available = total_records / 288 if total_records > 0 else 0
+        days_available = total_records / 1440 if total_records > 0 else 0  # 每天1440个1分钟数据点
         
         message += f"💎 {coin_name} 趋势分析\n"
         message += f"📈 数据: {days_available:.1f}天 ({total_records}条)\n\n"
@@ -109,7 +109,7 @@ def send_individual_trend_notification(symbol: str, trends: Dict[str, str], insi
         # 显示变化的时间框架
         message += "📊 趋势变化:\n"
         for timeframe, old_trend, new_trend in changed_timeframes:
-            tf_name = {"5m": "5分钟", "15m": "15分钟", "1h": "1小时", "4h": "4小时", "1d": "1天"}[timeframe]
+            tf_name = {"1m": "1分钟", "5m": "5分钟"}[timeframe]  # 只保留1分钟和5分钟
             old_emoji = trend_emojis.get(old_trend, "❓")
             new_emoji = trend_emojis.get(new_trend, "❓")
             
@@ -127,10 +127,10 @@ def send_individual_trend_notification(symbol: str, trends: Dict[str, str], insi
             message += f"  {tf_name}: {old_emoji}{old_trend} → {new_emoji}{new_trend}{strength_info}\n"
         
         message += "\n📈 当前所有时间框架:\n"
-        main_timeframes = ["5m", "15m", "1h", "4h", "1d"]
+        main_timeframes = ["1m", "5m"]  # 只保留1分钟和5分钟
         for tf in main_timeframes:
             if tf in trends:
-                tf_name = {"5m": "5分钟", "15m": "15分钟", "1h": "1小时", "4h": "4小时", "1d": "1天"}[tf]
+                tf_name = {"1m": "1分钟", "5m": "5分钟"}[tf]
                 trend = trends[tf]
                 emoji = trend_emojis.get(trend, "❓")
                 
@@ -176,7 +176,7 @@ def check_data_sufficiency(symbol: str) -> Dict[str, Any]:
         
         # 检查总数据量（用于初始化判断）
         cursor.execute("""
-            SELECT COUNT(*) FROM crypto_5min_data 
+            SELECT COUNT(*) FROM crypto_1min_data 
             WHERE symbol = %s
         """, (symbol,))
         
@@ -184,7 +184,7 @@ def check_data_sufficiency(symbol: str) -> Dict[str, Any]:
         
         # 检查最近30天的数据量（用于分析可行性判断）
         cursor.execute("""
-            SELECT COUNT(*) FROM crypto_5min_data 
+            SELECT COUNT(*) FROM crypto_1min_data 
             WHERE symbol = %s AND timestamp >= DATE_SUB(NOW(), INTERVAL 30 DAY)
         """, (symbol,))
         
@@ -192,9 +192,9 @@ def check_data_sufficiency(symbol: str) -> Dict[str, Any]:
         cursor.close()
         conn.close()
         
-        # 计算可用天数（每天288个5分钟数据点）
-        days_available = recent_30d_records / 288 if recent_30d_records > 0 else 0
-        total_days_available = total_records / 288 if total_records > 0 else 0
+        # 计算可用天数（每天1440个1分钟数据点）
+        days_available = recent_30d_records / 1440 if recent_30d_records > 0 else 0
+        total_days_available = total_records / 1440 if total_records > 0 else 0
         
         return {
             'total_records': total_records,
@@ -202,16 +202,10 @@ def check_data_sufficiency(symbol: str) -> Dict[str, Any]:
             'days_available': days_available,
             'total_days_available': total_days_available,
             # 分析可行性基于总数据量，因为技术指标需要足够的历史数据
-            # 5分钟：需要至少200个数据点（约17小时）
-            'can_analyze_5m': total_records >= 200,
-            # 15分钟：需要至少200个数据点（约50小时）
-            'can_analyze_15m': total_records >= 600,
-            # 1小时：需要至少200个数据点（200小时 = 2400条5分钟记录）
-            'can_analyze_1h': total_records >= 2400,
-            # 4小时：需要至少200个数据点（800小时 = 9600条5分钟记录）
-            'can_analyze_4h': total_records >= 9600,
-            # 1天：需要至少200个数据点（约200天）
-            'can_analyze_1d': total_records >= 57600
+            # 1分钟：需要至少200个数据点（约3.3小时）
+            'can_analyze_1m': total_records >= 200,
+            # 5分钟：需要至少1000个1分钟数据点（约17小时）
+            'can_analyze_5m': total_records >= 1000
         }
         
     except Exception as e:
@@ -229,19 +223,17 @@ def check_data_sufficiency(symbol: str) -> Dict[str, Any]:
         }
 
 def analyze_multiple_timeframes(symbol: str) -> tuple[Dict[str, str], Dict[str, str]]:
-    """分析多个时间框架"""
+    """分析多个时间框架 - 只保留1分钟和5分钟"""
     trends = {}
     insights = {}
     
     # 检查数据充足性
     data_status = check_data_sufficiency(symbol)
     
+    # 只保留1分钟和5分钟时间框架
     timeframes = {
-        "5m": 5,
-        "15m": 15,
-        "1h": 60,
-        "4h": 240,
-        "1d": 1440
+        "1m": 1,
+        "5m": 5
     }
     
     for tf_name, tf_minutes in timeframes.items():
@@ -284,8 +276,8 @@ def analyze_multiple_timeframes(symbol: str) -> tuple[Dict[str, str], Dict[str, 
     
     return trends, insights
 
-def initialize_historical_data(symbol: str, limit: int = 60000) -> bool:
-    """初始化历史数据 - 分批获取60000条数据"""
+def initialize_historical_data(symbol: str, limit: int = 2000) -> bool:
+    """初始化历史数据 - 分批获取2000条数据"""
     try:
         logger.info(f"Initializing historical data for {symbol} (limit: {limit})...")
         
@@ -305,10 +297,10 @@ def initialize_historical_data(symbol: str, limit: int = 60000) -> bool:
                 # 获取当前批次的K线数据
                 if end_time is None:
                     # 第一批：获取最新的1000条数据
-                    klines = api_client.fetch_binance_klines(symbol, '5m', batch_size)
+                    klines = api_client.fetch_binance_klines(symbol, '1m', batch_size)
                 else:
                     # 后续批次：使用endTime参数获取更早的数据
-                    klines = api_client.fetch_binance_klines_with_endtime(symbol, '5m', batch_size, end_time)
+                    klines = api_client.fetch_binance_klines_with_endtime(symbol, '1m', batch_size, end_time)
                 
                 if not klines:
                     logger.warning(f"No data returned for batch {batch_num + 1}, stopping...")
@@ -343,7 +335,7 @@ def initialize_historical_data(symbol: str, limit: int = 60000) -> bool:
         logger.info(f"Retrieved total {len(all_klines)} historical klines for {symbol}")
         
         # 批量存储历史数据
-        success = db_manager.store_historical_klines_bulk(symbol, all_klines, '5m')
+        success = db_manager.store_historical_klines_bulk(symbol, all_klines, '1m')
         
         if success:
             logger.info(f"Successfully stored {len(all_klines)} historical records for {symbol}")
@@ -401,15 +393,15 @@ def main():
                 data_status = check_data_sufficiency(symbol)
                 total_records = data_status.get('total_records', 0)
                 
-                if total_records >= 50000:  # 如果已有50000条以上数据，跳过初始化
+                if total_records >= 2000:  # 如果已有2000条以上数据，跳过初始化
                     logger.info(f"✓ {symbol} already has sufficient data ({total_records} records), skipping initialization")
                     initialization_results[symbol] = True
                     continue
                 
                 logger.info(f"Initializing data for {symbol} (current: {total_records} records)...")
                 
-                # 增加到60000条历史数据
-                success = initialize_historical_data(symbol, 60000)
+                # 获取2000条历史数据
+                success = initialize_historical_data(symbol, 2000)
                 initialization_results[symbol] = success
                 
                 if success:
@@ -477,23 +469,23 @@ def main():
                 # 获取最新的5分钟数据并存储
                 try:
                     # 通过API获取最新的K线数据
-                    latest_klines = api_client.fetch_binance_klines(symbol, '5m', 1)
+                    latest_klines = api_client.fetch_binance_klines(symbol, '1m', 1)
                     if latest_klines:
                         # 存储最新的K线数据到数据库
-                        success = db_manager.store_historical_klines_bulk(symbol, latest_klines, '5m')
+                        success = db_manager.store_historical_klines_bulk(symbol, latest_klines, '1m')
                         if success:
-                            logger.info(f"Stored latest 5min data for {symbol}")
+                            logger.info(f"Stored latest 1min data for {symbol}")
                         else:
-                            logger.error(f"Failed to store 5min data for {symbol}")
+                            logger.error(f"Failed to store 1min data for {symbol}")
                             continue
                     else:
-                        logger.error(f"Failed to get 5min data for {symbol}")
-                        continue  # 如果无法获取5分钟数据，跳过这个symbol
+                        logger.error(f"Failed to get 1min data for {symbol}")
+                        continue  # 如果无法获取1分钟数据，跳过这个symbol
                 except Exception as e:
-                    logger.error(f"Failed to process 5min data for {symbol}: {str(e)}")
+                    logger.error(f"Failed to process 1min data for {symbol}: {str(e)}")
                     continue
                 
-                # 基于数据库中的5分钟数据分析多个时间框架
+                # 基于数据库中的1分钟数据分析多个时间框架
                 symbol_trends, symbol_insights = analyze_multiple_timeframes(symbol)
                 all_trends[symbol] = symbol_trends
                 all_insights[symbol] = symbol_insights

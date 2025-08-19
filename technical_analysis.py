@@ -15,45 +15,66 @@ class TechnicalAnalyzer:
         self.volatility_threshold = volatility_threshold
     
     def detect_high_volatility(self, symbol: str, lookback_periods: int = 20) -> bool:
-        """检测当前市场波动率，判断是否需要更细粒度数据"""
+        """检测是否为高波动率市场（优先使用1分钟数据）"""
         try:
             conn = self.db_manager.get_connection()
             cursor = conn.cursor()
             
-            # 获取最近的ATR数据
+            # 优先从1分钟数据表获取数据
             cursor.execute("""
-                SELECT atr, close_price
-                FROM crypto_5min_data 
-                WHERE symbol = %s AND atr > 0
+                SELECT close_price, high_price, low_price, timestamp
+                FROM crypto_1min_data 
+                WHERE symbol = %s
                 ORDER BY timestamp DESC
                 LIMIT %s
-            """, (symbol, lookback_periods))
+            """, (symbol, lookback_periods * 5 + 14))  # 转换为1分钟等效周期
             
-            data = cursor.fetchall()
+            data_1min = cursor.fetchall()
+            
+            # 如果1分钟数据不足，回退到5分钟数据
+            if len(data_1min) < 70:  # 至少需要70个1分钟数据点
+                cursor.execute("""
+                    SELECT close_price, high_price, low_price, timestamp
+                    FROM crypto_5min_data 
+                    WHERE symbol = %s
+                    ORDER BY timestamp DESC
+                    LIMIT %s
+                """, (symbol, lookback_periods + 14))
+                
+                data = cursor.fetchall()
+                atr_period = 14  # 5分钟数据使用14周期ATR
+                volatility_threshold = self.volatility_threshold
+            else:
+                data = data_1min
+                atr_period = 7  # 1分钟数据使用7周期ATR，相当于7分钟
+                volatility_threshold = self.volatility_threshold * 0.8  # 1分钟数据降低阈值
+            
             cursor.close()
             conn.close()
             
-            if len(data) < 10:  # 需要足够的数据点
-                logger.debug(f"Insufficient ATR data for volatility detection: {len(data)} records")
+            if len(data) < atr_period:  # 需要足够的数据点
+                logger.debug(f"Insufficient data for volatility detection: {len(data)} records")
                 return False
             
-            # 计算ATR相对于价格的比率
-            atr_values = [row[0] for row in data]
-            prices = [row[1] for row in data]
+            # 转换为DataFrame计算ATR
+            df = pd.DataFrame(data, columns=['close', 'high', 'low', 'timestamp'])
+            df = df.sort_values('timestamp')  # 按时间升序排列
             
-            current_atr = atr_values[0]
-            current_price = prices[0]
-            avg_atr = np.mean(atr_values)
+            # 计算ATR
+            df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=atr_period)
             
-            # 计算ATR相对于价格的百分比
-            atr_percentage = (current_atr / current_price) * 100
-            avg_atr_percentage = (avg_atr / np.mean(prices)) * 100
+            # 获取最新ATR和平均ATR
+            current_atr = df['atr'].iloc[-1]
+            avg_atr = df['atr'].iloc[-lookback_periods:].mean()
+            
+            if pd.isna(current_atr) or pd.isna(avg_atr) or avg_atr == 0:
+                return False
             
             # 判断是否为高波动
             volatility_ratio = current_atr / avg_atr if avg_atr > 0 else 1
-            is_high_volatility = volatility_ratio > self.volatility_threshold
+            is_high_volatility = volatility_ratio > volatility_threshold
             
-            logger.debug(f"{symbol} volatility analysis: ATR={current_atr:.4f}, Ratio={volatility_ratio:.2f}, High={is_high_volatility}")
+            logger.debug(f"{symbol} volatility analysis: ATR={current_atr:.4f}, Ratio={volatility_ratio:.2f}, High={is_high_volatility}, Period={atr_period}")
             
             return is_high_volatility
             
@@ -327,15 +348,32 @@ class TechnicalAnalyzer:
             df = pd.DataFrame(data)
             df = df.sort_values('timestamp')
             
+            # 根据时间框架调整技术指标参数（针对1分钟高频数据优化）
+            if timeframe_minutes == 1:
+                # 1分钟数据使用更短周期的指标
+                sma_short_period = 5   # 5分钟移动平均
+                sma_long_period = 10   # 10分钟移动平均
+                adx_period = 7         # 7周期ADX，提高敏感度
+            elif timeframe_minutes == 5:
+                # 5分钟数据使用中等周期的指标
+                sma_short_period = 8   # 40分钟移动平均
+                sma_long_period = 15   # 75分钟移动平均
+                adx_period = 10        # 10周期ADX
+            else:
+                # 其他时间框架使用标准参数
+                sma_short_period = 10
+                sma_long_period = 20
+                adx_period = 14
+            
             # 计算移动平均线
-            df['sma_short'] = ta.sma(df['close'], length=10)
-            df['sma_long'] = ta.sma(df['close'], length=20)
+            df['sma_short'] = ta.sma(df['close'], length=sma_short_period)
+            df['sma_long'] = ta.sma(df['close'], length=sma_long_period)
             
             # 计算ADX指标
-            adx_data = ta.adx(df['high'], df['low'], df['close'], length=14)
-            df['adx'] = adx_data['ADX_14']
-            df['plus_di'] = adx_data['DMP_14']
-            df['minus_di'] = adx_data['DMN_14']
+            adx_data = ta.adx(df['high'], df['low'], df['close'], length=adx_period)
+            df['adx'] = adx_data[f'ADX_{adx_period}']
+            df['plus_di'] = adx_data[f'DMP_{adx_period}']
+            df['minus_di'] = adx_data[f'DMN_{adx_period}']
             
             # 获取最新值
             current_price = df['close'].iloc[-1]
@@ -345,13 +383,31 @@ class TechnicalAnalyzer:
             current_plus_di = df['plus_di'].iloc[-1] if not pd.isna(df['plus_di'].iloc[-1]) else 0
             current_minus_di = df['minus_di'].iloc[-1] if not pd.isna(df['minus_di'].iloc[-1]) else 0
             
-            # 判断趋势强度
-            if current_adx > 30:
-                trend_strength = '强'
-            elif current_adx > 20:
-                trend_strength = '中'
+            # 根据时间框架调整ADX强度判断阈值
+            if timeframe_minutes == 1:
+                # 1分钟数据使用更低的阈值，因为高频数据波动更大
+                if current_adx > 25:
+                    trend_strength = '强'
+                elif current_adx > 15:
+                    trend_strength = '中'
+                else:
+                    trend_strength = '弱'
+            elif timeframe_minutes == 5:
+                # 5分钟数据使用中等阈值
+                if current_adx > 28:
+                    trend_strength = '强'
+                elif current_adx > 18:
+                    trend_strength = '中'
+                else:
+                    trend_strength = '弱'
             else:
-                trend_strength = '弱'
+                # 其他时间框架使用标准阈值
+                if current_adx > 30:
+                    trend_strength = '强'
+                elif current_adx > 20:
+                    trend_strength = '中'
+                else:
+                    trend_strength = '弱'
             
             # 趋势方向判断（结合移动平均线和DMI）
             ma_trend = ''
@@ -385,13 +441,31 @@ class TechnicalAnalyzer:
                 direction = '震荡'
                 base_confidence = 30
             
-            # 根据ADX调整置信度
-            if current_adx > 30:
-                confidence = min(95, base_confidence + 20)
-            elif current_adx > 20:
-                confidence = min(85, base_confidence + 10)
+            # 根据时间框架和ADX调整置信度
+            if timeframe_minutes == 1:
+                # 1分钟数据的置信度调整
+                if current_adx > 25:
+                    confidence = min(90, base_confidence + 15)  # 1分钟数据最高置信度稍低
+                elif current_adx > 15:
+                    confidence = min(80, base_confidence + 8)
+                else:
+                    confidence = max(25, base_confidence - 10)
+            elif timeframe_minutes == 5:
+                # 5分钟数据的置信度调整
+                if current_adx > 28:
+                    confidence = min(93, base_confidence + 18)
+                elif current_adx > 18:
+                    confidence = min(83, base_confidence + 9)
+                else:
+                    confidence = max(22, base_confidence - 12)
             else:
-                confidence = max(20, base_confidence - 15)
+                # 其他时间框架使用标准置信度调整
+                if current_adx > 30:
+                    confidence = min(95, base_confidence + 20)
+                elif current_adx > 20:
+                    confidence = min(85, base_confidence + 10)
+                else:
+                    confidence = max(20, base_confidence - 15)
             
             # 计算支撑阻力位
             recent_lows = df['low'].tail(20)
