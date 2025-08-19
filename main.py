@@ -494,7 +494,7 @@ def main():
                 symbol_trend_changed = False
                 changed_timeframes = []
                 
-                for timeframe in ["5m", "15m", "1h", "4h", "1d"]:
+                for timeframe in ["1m", "5m"]:
                     current_trend = symbol_trends.get(timeframe, "未知")
                     # 初始化last_trends中不存在的时间框架
                     if timeframe not in last_trends[symbol]:
@@ -520,7 +520,7 @@ def main():
             else:
                 logger.info("No trend changes detected across all timeframes")
                 
-            logger.info("Multi-timeframe analysis cycle completed, waiting 5 minutes...")
+            logger.info("Multi-timeframe analysis cycle completed, waiting 1 minutes...")
             
         except Exception as e:
             logger.error(f"Error in main loop: {str(e)}")
