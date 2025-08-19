@@ -129,73 +129,70 @@ class TechnicalAnalyzer:
             logger.error(f"Error aggregating 1min to 5min data: {str(e)}")
             return pd.DataFrame()
     
-    def aggregate_to_timeframe(self, symbol: str, timeframe_minutes: int = 15, limit: int = 1000) -> List[Dict[str, Any]]:
-        """将5分钟数据聚合为指定时间框架"""
+    def aggregate_to_timeframe(self, symbol: str, timeframe_minutes: int, limit: int = 200) -> List[Dict[str, Any]]:
+        """从1分钟数据聚合到指定的时间框架"""
         try:
-            # 确保timeframe_minutes是整数类型
-            if isinstance(timeframe_minutes, str):
-                timeframe_minutes = int(timeframe_minutes)
-            
-            # 从数据库获取5分钟数据
-            data = self.db_manager.get_historical_data(symbol, 5, limit * (timeframe_minutes // 5))
-            
-            if not data:
-                logger.warning(f"No 5min data found for {symbol}")
+            if timeframe_minutes < 1:
+                raise ValueError("Timeframe must be at least 1 minute")
+
+            # 如果是1分钟，直接从数据库获取
+            if timeframe_minutes == 1:
+                data = self.db_manager.get_historical_data(symbol, 1, limit)
+                if not data:
+                    logger.warning(f"No 1min data found for {symbol}")
+                    return []
+                
+                # 转换格式以匹配聚合后输出
+                return [
+                    {
+                        'timestamp': row[0],
+                        'open': row[1],
+                        'high': row[2],
+                        'low': row[3],
+                        'close': row[4],
+                        'volume': row[5]
+                    }
+                    for row in data
+                ]
+
+            # 计算需要获取多少1分钟数据
+            # 为了生成`limit`个聚合数据点，我们需要 `limit * timeframe_minutes` 个1分钟数据
+            # 再额外加上一些数据以确保聚合窗口的完整性
+            required_1min_records = limit * timeframe_minutes + 50 # 增加缓冲
+
+            # 从数据库获取1分钟数据
+            data_1min = self.db_manager.get_historical_data(symbol, 1, required_1min_records)
+
+            if not data_1min:
+                logger.warning(f"No 1min data found for {symbol} to aggregate")
                 return []
+
+            # 转换为DataFrame
+            df_1min = pd.DataFrame(data_1min, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df_1min['timestamp'] = pd.to_datetime(df_1min['timestamp'])
+            df_1min.set_index('timestamp', inplace=True)
+
+            # 按指定时间框架重采样
+            agg_rule = f'{timeframe_minutes}T'
+            df_agg = df_1min.resample(agg_rule).agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'sum'
+            }).dropna()
             
-            # 按时间框架分组聚合
-            aggregated = []
-            points_per_period = timeframe_minutes // 5  # 每个时间框架包含的5分钟数据点数
+            # 按时间倒序并限制数量
+            df_agg = df_agg.sort_index(ascending=False).head(limit)
+
+            # 重置索引并将结果转换为字典列表
+            df_agg.reset_index(inplace=True)
             
-            for i in range(0, len(data), points_per_period):
-                period_data = data[i:i + points_per_period]
-                
-                if len(period_data) < points_per_period:
-                    continue  # 跳过不完整的周期
-                
-                try:
-                    # 获取周期的开始时间（最新的时间戳）
-                    timestamp = period_data[0][0]  # 第一条记录的时间戳
-                    
-                    # 计算OHLCV
-                    open_price = float(period_data[-1][1])  # 周期开始价格（最早的记录）
-                    close_price = float(period_data[0][2])  # 周期结束价格（最新的记录）
-                    
-                    # 过滤有效的高低价数据
-                    valid_highs = [float(row[2]) for row in period_data if row[2] is not None and float(row[2]) > 0]
-                    valid_lows = [float(row[3]) for row in period_data if row[3] is not None and float(row[3]) > 0]
-                    valid_volumes = [float(row[5]) for row in period_data if row[5] is not None and float(row[5]) >= 0]
-                    
-                    if not valid_highs or not valid_lows:
-                        continue  # 跳过无效数据
-                    
-                    high_price = max(valid_highs)  # 周期内最高价
-                    low_price = min(valid_lows)  # 周期内最低价
-                    volume = sum(valid_volumes) if valid_volumes else 0  # 周期内总成交量
-                    
-                    # 数据验证
-                    if high_price < low_price or open_price <= 0 or close_price <= 0:
-                        logger.warning(f"Invalid OHLC data: O={open_price}, H={high_price}, L={low_price}, C={close_price}")
-                        continue
-                    
-                    aggregated.append({
-                        'timestamp': timestamp,
-                        'open': open_price,
-                        'high': high_price,
-                        'low': low_price,
-                        'close': close_price,
-                        'volume': volume
-                    })
-                    
-                except (ValueError, TypeError, IndexError) as e:
-                    logger.warning(f"Error aggregating period data: {str(e)}")
-                    continue
-            
-            logger.debug(f"Successfully aggregated to {len(aggregated)} {timeframe_minutes}min periods")
-            return aggregated
-            
+            logger.debug(f"Aggregated {len(data_1min)} 1min records to {len(df_agg)} {timeframe_minutes}min records for {symbol}")
+            return df_agg.to_dict('records')
+
         except Exception as e:
-            logger.error(f"Error aggregating data for {symbol}: {str(e)}")
+            logger.error(f"Error aggregating data for {symbol} to {timeframe_minutes}min: {str(e)}")
             return []
     
     def calculate_indicators_from_5min_data(self, symbol: str, limit: int = 1000) -> Optional[Dict[str, Any]]:
